@@ -40,10 +40,10 @@ fn read_stats(path: &PathBuf) -> io::Result<Metrics> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((key, val)) = line.split_once(' ') {
-            if let Ok(v) = val.parse::<u64>() {
-                map.insert(key.to_string(), v);
-            }
+        if let Some((key, val)) = line.split_once(' ')
+            && let Ok(v) = val.parse::<u64>()
+        {
+            map.insert(key.to_string(), v);
         }
     }
     Ok(map)
@@ -216,10 +216,11 @@ fn print_header(sections: &[Section], stdout: &mut io::Stdout) {
         for col in &section.columns {
             write!(
                 stdout,
-                " {}{}{}",
+                " {}{:>width$}{}",
                 SetForegroundColor(col.color),
-                format!("{:>width$}", col.label, width = col.width),
-                ResetColor
+                col.label,
+                ResetColor,
+                width = col.width
             )
             .unwrap();
         }
@@ -242,10 +243,11 @@ fn print_row(sections: &[Section], prev: &Metrics, curr: &Metrics, dt: f64, stdo
             let val = values.get(i).map(|s| s.as_str()).unwrap_or("-");
             write!(
                 stdout,
-                " {}{}{}",
+                " {}{:>width$}{}",
                 SetForegroundColor(col.color),
-                format!("{:>width$}", val, width = col.width),
-                ResetColor
+                val,
+                ResetColor,
+                width = col.width
             )
             .unwrap();
         }
@@ -303,7 +305,7 @@ fn main() {
         stdout.flush().unwrap();
 
         line_count += 1;
-        if args.header_every > 0 && line_count % args.header_every == 0 {
+        if args.header_every > 0 && line_count.is_multiple_of(args.header_every) {
             println!();
             print_header(&sections, &mut stdout);
             stdout.flush().unwrap();

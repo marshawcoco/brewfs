@@ -11,7 +11,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::io::FromRawFd;
 use std::pin::pin;
@@ -24,8 +24,8 @@ use io_uring::{opcode, types, IoUring};
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
 
-use bytes::Bytes;
 use super::CompleteIoResult;
+use bytes::Bytes;
 
 /// Number of submission queue entries in the io_uring ring.
 const RING_SIZE: u32 = 64;
@@ -46,8 +46,8 @@ struct ReadRequest {
 
 /// Represents a pending write request sent to the ring thread.
 struct WriteRequest {
-	    data: Bytes,
-	    body_extend: Option<Bytes>,
+    data: Bytes,
+    body_extend: Option<Bytes>,
     reply: oneshot::Sender<CompleteIoResult<(Bytes, Option<Bytes>), usize>>,
 }
 
@@ -74,15 +74,6 @@ impl AlignedDataBuf {
             ptr: slice.as_mut_ptr(),
             len: slice.len(),
         }
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: pointer is valid for the lifetime of the original buffer
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
     }
 }
 
@@ -226,10 +217,7 @@ impl FuseConnection {
 
         // SAFETY: We hold `data_buf` alive until the oneshot completes,
         // and the ring thread only accesses it during the readv syscall.
-        let aligned = AlignedDataBuf {
-            ptr: data_buf.deref_mut().as_mut_ptr(),
-            len: data_buf.deref_mut().len(),
-        };
+        let aligned = AlignedDataBuf::new(&mut data_buf);
 
         let req = RingRequest::Read(ReadRequest {
             header_buf,
@@ -378,19 +366,16 @@ fn ring_thread_main(fd: i32, mut rx: mpsc::Receiver<RingRequest>) -> io::Result<
         }
 
         // Drain all pending requests from the channel
-        loop {
-            match rx.try_recv() {
-                Ok(req) => submit_request(
-                    &mut ring,
-                    fd,
-                    req,
-                    &mut pending_read,
-                    &mut pending_writes,
-                    &mut read_inflight,
-                    &mut writes_inflight,
-                )?,
-                Err(_) => break,
-            }
+        while let Ok(req) = rx.try_recv() {
+            submit_request(
+                &mut ring,
+                fd,
+                req,
+                &mut pending_read,
+                &mut pending_writes,
+                &mut read_inflight,
+                &mut writes_inflight,
+            )?;
         }
 
         if !read_inflight && writes_inflight == 0 {
@@ -481,7 +466,7 @@ fn submit_request(
             unsafe {
                 ring.submission()
                     .push(&entry)
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "SQ full"))?;
+                    .map_err(|_| io::Error::other("SQ full"))?;
             }
             *pending_read = Some(InflightRead {
                 req,
@@ -527,7 +512,7 @@ fn submit_request(
             unsafe {
                 ring.submission()
                     .push(&entry)
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "SQ full"))?;
+                    .map_err(|_| io::Error::other("SQ full"))?;
             }
             pending_writes.push(Some(InflightWrite {
                 req,

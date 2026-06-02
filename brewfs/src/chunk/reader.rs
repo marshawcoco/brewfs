@@ -27,7 +27,7 @@ unsafe impl Send for SendBuf {}
 
 impl SendBuf {
     /// SAFETY: caller must ensure exclusive access and valid lifetime.
-    unsafe fn as_mut_slice(&self) -> &mut [u8] {
+    unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 }
@@ -178,7 +178,7 @@ where
                     // SAFETY: each block_buf is a non-overlapping sub-slice of
                     // `seg` (which itself is a non-overlapping sub-slice of `buf`).
                     // Only one future writes to each region.
-                    let send_buf = SendBuf {
+                    let mut send_buf = SendBuf {
                         ptr: block_buf.as_mut_ptr(),
                         len: block_buf.len(),
                     };
@@ -263,7 +263,7 @@ where
                 let block_key = (slice_id, block.index.as_u32());
                 let block_offset = block.offset;
                 // SAFETY: each block_buf is a non-overlapping sub-slice of `seg`
-                let send_buf = SendBuf {
+                let mut send_buf = SendBuf {
                     ptr: block_buf.as_mut_ptr(),
                     len: block_buf.len(),
                 };

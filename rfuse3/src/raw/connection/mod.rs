@@ -25,7 +25,11 @@ pub use tokio::FuseConnection;
 mod async_io;
 #[cfg(feature = "io-uring-runtime")]
 mod io_uring_conn;
-#[cfg(feature = "tokio-runtime")]
+#[cfg(all(
+    not(feature = "async-io-runtime"),
+    not(feature = "io-uring-runtime"),
+    feature = "tokio-runtime"
+))]
 mod tokio;
 
 pub(crate) type CompleteIoResult<T, U> = (T, io::Result<U>);
