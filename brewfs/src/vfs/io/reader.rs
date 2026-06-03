@@ -17,6 +17,7 @@ use crate::vfs::config::ReadConfig;
 use crate::vfs::io::split_chunk_spans;
 use crate::vfs::memory::{MemoryBudget, PressureLevel};
 use dashmap::{DashMap, Entry};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -792,15 +793,24 @@ where
         // handles asynchronous readahead after each successful read.
         let _ahead = self.check_session(offset, actual_len);
 
-        let mut chunks: Vec<bytes::Bytes> = Vec::new();
+        let mut chunks: Vec<Option<bytes::Bytes>> = vec![None; spans.len()];
         let result = async {
-            for span in spans {
+            let mut reads = FuturesUnordered::new();
+            for (idx, span) in spans.into_iter().enumerate() {
                 let span_len = span.len.as_usize();
-                let data = self
-                    .read_chunk_span(span.index, span.offset, span_len)
-                    .await?;
-                chunks.push(data);
+                reads.push(async move {
+                    let data = self
+                        .read_chunk_span(span.index, span.offset, span_len)
+                        .await?;
+                    Ok::<_, anyhow::Error>((idx, data))
+                });
             }
+
+            while let Some(res) = reads.next().await {
+                let (idx, data) = res?;
+                chunks[idx] = Some(data);
+            }
+
             Ok::<_, anyhow::Error>(actual_len)
         }
         .instrument(tracing::trace_span!("read_at.read_spans"))
@@ -810,9 +820,13 @@ where
 
         // Assemble Bytes chunks into output
         let data = if result.is_ok() {
-            let total: usize = chunks.iter().map(|c| c.len()).sum();
+            let total: usize = chunks
+                .iter()
+                .filter_map(|chunk| chunk.as_ref())
+                .map(|chunk| chunk.len())
+                .sum();
             let mut out = Vec::with_capacity(total);
-            for chunk in &chunks {
+            for chunk in chunks.iter().filter_map(|chunk| chunk.as_ref()) {
                 out.extend_from_slice(chunk);
             }
             out
@@ -1452,6 +1466,132 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    struct DelayedBlockStore {
+        data: StdMutex<HashMap<BlockKey, Vec<u8>>>,
+        read_delay: Duration,
+        active_reads: AtomicUsize,
+        max_active_reads: AtomicUsize,
+    }
+
+    impl DelayedBlockStore {
+        fn new(read_delay: Duration) -> Self {
+            Self {
+                data: StdMutex::new(HashMap::new()),
+                read_delay,
+                active_reads: AtomicUsize::new(0),
+                max_active_reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn max_active_reads(&self) -> usize {
+            self.max_active_reads.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockStore for DelayedBlockStore {
+        async fn write_fresh_range(
+            &self,
+            key: BlockKey,
+            offset: u64,
+            data: &[u8],
+        ) -> anyhow::Result<u64> {
+            let mut guard = self.data.lock().unwrap();
+            let entry = guard.entry(key).or_default();
+            let start = offset as usize;
+            let end = start + data.len();
+            if entry.len() < end {
+                entry.resize(end, 0);
+            }
+            entry[start..end].copy_from_slice(data);
+            Ok(data.len() as u64)
+        }
+
+        async fn read_range(
+            &self,
+            key: BlockKey,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> anyhow::Result<()> {
+            let active = self.active_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ =
+                self.max_active_reads
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                        Some(current.max(active))
+                    });
+            sleep(self.read_delay).await;
+            self.active_reads.fetch_sub(1, Ordering::SeqCst);
+
+            let guard = self.data.lock().unwrap();
+            if let Some(src) = guard.get(&key) {
+                let start = offset as usize;
+                let end = (start + buf.len()).min(src.len());
+                if start < end {
+                    buf[..end - start].copy_from_slice(&src[start..end]);
+                }
+            }
+            Ok(())
+        }
+
+        async fn delete_range(&self, key: BlockKey, block_count: u64) -> anyhow::Result<()> {
+            let mut guard = self.data.lock().unwrap();
+            for block in key.1..key.1 + block_count as u32 {
+                guard.remove(&(key.0, block));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_cross_chunk_read_fetches_chunks_concurrently() {
+        let layout = ChunkLayout {
+            chunk_size: 4 * 1024,
+            block_size: 4 * 1024,
+        };
+        let block_store = Arc::new(DelayedBlockStore::new(Duration::from_millis(50)));
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta_store = meta_handle.store();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(block_store.clone(), meta.clone()));
+
+        let ino: i64 = 67;
+        let mut expected = Vec::new();
+        for chunk_index in 0..4 {
+            let data = vec![chunk_index as u8 + 1; layout.chunk_size as usize];
+            expected.extend_from_slice(&data);
+
+            let slice_id = meta_store.next_id(SLICE_ID_KEY).await.unwrap();
+            block_store
+                .write_fresh_range((slice_id as u64, 0), 0, &data)
+                .await
+                .unwrap();
+            meta_store
+                .append_slice(
+                    chunk_id_for(ino, chunk_index).unwrap(),
+                    SliceDesc {
+                        slice_id: slice_id as u64,
+                        chunk_id: chunk_id_for(ino, chunk_index).unwrap(),
+                        offset: 0,
+                        length: data.len() as u64,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let inode = Inode::new(ino, expected.len() as u64);
+        let reader = DataReader::new(Arc::new(ReadConfig::new(layout)), backend.clone());
+        let file_reader = reader.open_for_handle(inode, 1);
+
+        let out = file_reader.read(0, expected.len()).await.unwrap();
+
+        assert_eq!(out, expected);
+        assert!(
+            block_store.max_active_reads() > 1,
+            "cross-chunk reads should overlap block fetches"
+        );
     }
 
     #[tokio::test]
