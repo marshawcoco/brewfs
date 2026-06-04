@@ -284,14 +284,15 @@ impl SliceState {
     }
 
     fn can_overlay_read(&self) -> bool {
-        matches!(
-            self.state,
+        match self.state {
             SliceStatus::Writable
-                | SliceStatus::Readonly
-                | SliceStatus::Uploaded
-                | SliceStatus::Failed
-                | SliceStatus::Committed
-        )
+            | SliceStatus::Readonly
+            | SliceStatus::Uploaded
+            | SliceStatus::Failed => true,
+            // Commit-before-upload exposes metadata before object upload
+            // completion; overlay only needs to cover that upload gap.
+            SliceStatus::Committed => !self.upload_complete(),
+        }
     }
 
     pub fn has_idle_block(&self) -> bool {
@@ -3358,6 +3359,21 @@ mod tests {
         .expect("blocked object upload should eventually finish");
 
         assert_eq!(uploaded, data);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if writer
+                    .read_dirty_if_fully_covered(0, len)
+                    .await
+                    .unwrap()
+                    .is_none()
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("uploaded committed data should stop participating in overlay");
     }
 
     #[tokio::test]
