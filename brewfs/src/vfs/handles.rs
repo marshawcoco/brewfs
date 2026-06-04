@@ -304,6 +304,10 @@ where
         self.write_dirty.store(true, Ordering::Release);
     }
 
+    pub(crate) fn has_write_dirty(&self) -> bool {
+        self.write_dirty.load(Ordering::Acquire)
+    }
+
     pub(crate) fn take_write_dirty(&self) -> bool {
         self.write_dirty.swap(false, Ordering::AcqRel)
     }

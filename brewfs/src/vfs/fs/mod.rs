@@ -2158,9 +2158,9 @@ where
             return Ok(Vec::new());
         }
         let actual_len = len.min((file_size - offset) as usize);
-        let writer = self.state.writer.clone();
-        let ino = handle.ino as u64;
-        let dirty_data = {
+        let dirty_data = if handle.flags.write && handle.has_write_dirty() {
+            let writer = self.state.writer.clone();
+            let ino = handle.ino as u64;
             let _dirty_probe_timer = self.vfs_timing_timer(
                 &self.state.stats.vfs_read_dirty_probe_ops,
                 &self.state.stats.vfs_read_dirty_probe_lat_us,
@@ -2172,6 +2172,8 @@ where
                 })
                 .await
                 .map_err(VfsError::from)?
+        } else {
+            None
         };
         if let Some(data) = dirty_data {
             return Ok(data);
