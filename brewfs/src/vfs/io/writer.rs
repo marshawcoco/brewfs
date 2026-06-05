@@ -1342,7 +1342,6 @@ where
 
         let layout = self.shared.config.layout;
         let spans = split_chunk_spans(layout, offset, buf.len());
-        let mut missing = crate::utils::Intervals::new(offset, offset + buf.len() as u64);
 
         // Pre-compute chunk IDs (propagate errors immediately).
         let span_cids: Vec<_> = spans
@@ -1368,6 +1367,33 @@ where
                 })
                 .collect()
         };
+
+        let mut has_overlap = false;
+        for (span, slices_opt) in spans.iter().zip(slice_refs.iter()) {
+            let Some(slices) = slices_opt else {
+                continue;
+            };
+            let span_start = span.offset;
+            let span_end = span.offset + span.len;
+            for slice in slices {
+                let state = slice.lock();
+                if !state.can_overlay_read() {
+                    continue;
+                }
+                if span_start < state.offset + state.data.len() && state.offset < span_end {
+                    has_overlap = true;
+                    break;
+                }
+            }
+            if has_overlap {
+                break;
+            }
+        }
+        if !has_overlap {
+            return Ok(false);
+        }
+
+        let mut missing = crate::utils::Intervals::new(offset, offset + buf.len() as u64);
 
         for (span, slices_opt) in spans.iter().zip(slice_refs.iter()) {
             let Some(slices) = slices_opt else {
