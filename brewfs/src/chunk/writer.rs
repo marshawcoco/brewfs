@@ -15,8 +15,10 @@ use tokio::sync::Semaphore;
 const FG_UPLOAD_PERMITS: usize = 192;
 /// Background upload permits (compaction/warmup) — lower priority, smaller pool.
 const BG_UPLOAD_PERMITS: usize = 64;
-/// Commit-before-upload writeback permits — tiny pool to avoid starving reads.
-const WRITEBACK_UPLOAD_PERMITS: usize = 1;
+/// Commit-before-upload writeback permits. Keep this small so background
+/// writeback does not starve reads, but allow enough overlap to avoid leaving
+/// S3 far behind sustained sequential writes.
+const WRITEBACK_UPLOAD_PERMITS: usize = 3;
 
 static FG_UPLOAD_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(FG_UPLOAD_PERMITS));
 static BG_UPLOAD_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(BG_UPLOAD_PERMITS));
