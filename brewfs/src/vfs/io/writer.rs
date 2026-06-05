@@ -2618,6 +2618,13 @@ pub(crate) struct DataWriter<B, M> {
     memory_budget: Option<MemoryBudget>,
 }
 
+#[derive(Default, Debug, Clone, Copy)]
+pub(crate) struct WritebackDirtyBreakdown {
+    pub live_bytes: u64,
+    pub recently_committed_pending_upload_bytes: u64,
+    pub recently_committed_uploaded_bytes: u64,
+}
+
 impl<B, M> DataWriter<B, M>
 where
     B: BlockStore + Send + Sync + 'static,
@@ -2663,6 +2670,41 @@ where
             .clone();
         writer.mark_active();
         writer
+    }
+
+    pub(crate) async fn dirty_breakdown(&self) -> WritebackDirtyBreakdown {
+        let writers: Vec<Arc<FileWriter<B, M>>> = self
+            .files
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        let mut breakdown = WritebackDirtyBreakdown::default();
+
+        for writer in writers {
+            let guard = writer.shared.inner.lock().await;
+            for chunk in guard.chunks.values() {
+                for slice in &chunk.slices {
+                    breakdown.live_bytes = breakdown
+                        .live_bytes
+                        .saturating_add(slice.lock().data.alloc_bytes());
+                }
+                for slice in &chunk.recently_committed {
+                    let state = slice.lock();
+                    let bytes = state.data.alloc_bytes();
+                    if state.upload_complete() {
+                        breakdown.recently_committed_uploaded_bytes = breakdown
+                            .recently_committed_uploaded_bytes
+                            .saturating_add(bytes);
+                    } else {
+                        breakdown.recently_committed_pending_upload_bytes = breakdown
+                            .recently_committed_pending_upload_bytes
+                            .saturating_add(bytes);
+                    }
+                }
+            }
+        }
+
+        breakdown
     }
 
     pub(crate) fn start_flush_background(self: &Arc<Self>) {

@@ -741,6 +741,7 @@ where
         let (cache_hits, cache_misses) = store.cache_counters();
         let object_metrics = store.object_store_metrics();
         let memory_budget = state.memory_budget.clone();
+        let writer = state.writer.clone();
         if cache_hits.is_some()
             || cache_misses.is_some()
             || object_metrics.is_some()
@@ -765,6 +766,12 @@ where
                             memory_budget.reader_bytes(),
                         );
                     }
+                    let dirty = writer.dirty_breakdown().await;
+                    fuse_stats.sync_writeback_dirty_breakdown(
+                        dirty.live_bytes,
+                        dirty.recently_committed_pending_upload_bytes,
+                        dirty.recently_committed_uploaded_bytes,
+                    );
                     if let Some(object_metrics) = &object_metrics {
                         let object = object_metrics.snapshot();
                         fuse_stats.sync_object_store_metrics(

@@ -74,6 +74,9 @@ pub struct FsStatsSnapshot {
     pub s3_del_ops: u64,
     pub buf_dirty_bytes: u64,
     pub buf_read_bytes: u64,
+    pub writeback_live_dirty_bytes: u64,
+    pub writeback_recent_pending_upload_bytes: u64,
+    pub writeback_recent_uploaded_bytes: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
 }
@@ -248,6 +251,12 @@ pub struct FsStats {
     pub buf_dirty_bytes: AtomicU64,
     /// Current reader cache bytes
     pub buf_read_bytes: AtomicU64,
+    /// Dirty bytes in active writeback slices.
+    pub writeback_live_dirty_bytes: AtomicU64,
+    /// Recently committed bytes still waiting for S3 upload completion.
+    pub writeback_recent_pending_upload_bytes: AtomicU64,
+    /// Recently committed bytes already uploaded to S3 but kept for overlay grace.
+    pub writeback_recent_uploaded_bytes: AtomicU64,
     /// Block cache hit count
     pub cache_hits: AtomicU64,
     /// Block cache miss count
@@ -313,6 +322,9 @@ impl FsStats {
             s3_del_ops: AtomicU64::new(0),
             buf_dirty_bytes: AtomicU64::new(0),
             buf_read_bytes: AtomicU64::new(0),
+            writeback_live_dirty_bytes: AtomicU64::new(0),
+            writeback_recent_pending_upload_bytes: AtomicU64::new(0),
+            writeback_recent_uploaded_bytes: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
         }
@@ -376,6 +388,11 @@ impl FsStats {
             s3_del_ops: self.s3_del_ops.load(ORD),
             buf_dirty_bytes: self.buf_dirty_bytes.load(ORD),
             buf_read_bytes: self.buf_read_bytes.load(ORD),
+            writeback_live_dirty_bytes: self.writeback_live_dirty_bytes.load(ORD),
+            writeback_recent_pending_upload_bytes: self
+                .writeback_recent_pending_upload_bytes
+                .load(ORD),
+            writeback_recent_uploaded_bytes: self.writeback_recent_uploaded_bytes.load(ORD),
             cache_hits: self.cache_hits.load(ORD),
             cache_misses: self.cache_misses.load(ORD),
         }
@@ -389,6 +406,19 @@ impl FsStats {
     pub fn sync_buffer_bytes(&self, dirty_bytes: u64, read_bytes: u64) {
         self.buf_dirty_bytes.store(dirty_bytes, ORD);
         self.buf_read_bytes.store(read_bytes, ORD);
+    }
+
+    pub fn sync_writeback_dirty_breakdown(
+        &self,
+        live_bytes: u64,
+        recent_pending_upload_bytes: u64,
+        recent_uploaded_bytes: u64,
+    ) {
+        self.writeback_live_dirty_bytes.store(live_bytes, ORD);
+        self.writeback_recent_pending_upload_bytes
+            .store(recent_pending_upload_bytes, ORD);
+        self.writeback_recent_uploaded_bytes
+            .store(recent_uploaded_bytes, ORD);
     }
 
     pub fn sync_object_store_metrics(
@@ -688,6 +718,18 @@ impl FsStats {
             snapshot.buf_dirty_bytes
         ));
         out.push_str(&format!(
+            "brewfs_writeback_live_dirty_bytes {}\n",
+            snapshot.writeback_live_dirty_bytes
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_recent_pending_upload_bytes {}\n",
+            snapshot.writeback_recent_pending_upload_bytes
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_recent_uploaded_bytes {}\n",
+            snapshot.writeback_recent_uploaded_bytes
+        ));
+        out.push_str(&format!(
             "brewfs_reader_buffer_bytes {}\n",
             snapshot.buf_read_bytes
         ));
@@ -815,6 +857,7 @@ mod tests {
         stats.s3_put_cache_lat_us.store(100, ORD);
         stats.sync_cache_counters(8, 2);
         stats.sync_buffer_bytes(4096, 8192);
+        stats.sync_writeback_dirty_breakdown(1024, 2048, 512);
 
         let output = stats.render();
         assert!(output.contains("brewfs_fuse_read_ops_total 42"));
@@ -830,6 +873,9 @@ mod tests {
         assert!(output.contains("brewfs_cache_requests_total 10"));
         assert!(output.contains("brewfs_cache_hit_ratio 0.800000"));
         assert!(output.contains("brewfs_writeback_dirty_bytes 4096"));
+        assert!(output.contains("brewfs_writeback_live_dirty_bytes 1024"));
+        assert!(output.contains("brewfs_writeback_recent_pending_upload_bytes 2048"));
+        assert!(output.contains("brewfs_writeback_recent_uploaded_bytes 512"));
         assert!(output.contains("brewfs_reader_buffer_bytes 8192"));
         assert!(output.contains("brewfs_vfs_create_total_ops_total 0"));
         assert!(output.contains("brewfs_vfs_unlink_lookup_lat_us_total 0"));
@@ -851,6 +897,7 @@ mod tests {
         stats.fuse_write_ops.store(4, ORD);
         stats.fuse_write_lat_us.store(1000, ORD);
         stats.sync_cache_counters(3, 1);
+        stats.sync_writeback_dirty_breakdown(11, 22, 33);
         stats.sync_object_store_metrics(2, 8192, 50, 1, 4096, 25, 75, 125, 3);
 
         let snapshot = stats.snapshot();
@@ -866,6 +913,9 @@ mod tests {
         assert_eq!(snapshot.avg_s3_put_prepare_lat_us(), 75.0);
         assert_eq!(snapshot.avg_s3_put_cache_lat_us(), 125.0);
         assert_eq!(snapshot.s3_del_ops, 3);
+        assert_eq!(snapshot.writeback_live_dirty_bytes, 11);
+        assert_eq!(snapshot.writeback_recent_pending_upload_bytes, 22);
+        assert_eq!(snapshot.writeback_recent_uploaded_bytes, 33);
     }
 
     #[test]
