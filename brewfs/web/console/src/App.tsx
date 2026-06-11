@@ -1644,33 +1644,53 @@ function CsiDashboardPage({
             </div>
           ) : null}
           {result.resources.length > 0 ? (
-            <div className="table-wrap">
-              <table className="data-table compact-data-table">
-                <thead>
-                  <tr>
-                    <th>Resource</th>
-                    <th>State</th>
-                    <th>Items</th>
-                    <th>Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.resources.map((resource) => (
-                    <tr key={resource.key}>
-                      <td>{resource.title}</td>
-                      <td>{resource.state}</td>
-                      <td>{resource.count ?? '-'}</td>
-                      <td>{resource.message}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="csi-resource-list">
+              {result.resources.map((resource) => (
+                <section className="csi-resource-section" key={resource.key}>
+                  <div className="resource-heading">
+                    <h3>{resource.title}</h3>
+                    <span>
+                      {resource.state} · {formatItemCount(resource.count)}
+                    </span>
+                  </div>
+                  <p className="muted feature-message">{resource.message}</p>
+                  {resource.rows.length > 0 ? (
+                    <div className="table-wrap">
+                      <table className="data-table csi-resource-table">
+                        <thead>
+                          <tr>
+                            <th>Namespace</th>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Detail</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {resource.rows.map((row) => (
+                            <tr key={`${resource.key}:${row.namespace}:${row.name}:${row.detail}`}>
+                              <td>{row.namespace}</td>
+                              <td>{row.name}</td>
+                              <td>{row.status}</td>
+                              <td>{row.detail}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </section>
+              ))}
             </div>
           ) : null}
         </>
       ) : null}
     </article>
   );
+}
+
+function formatItemCount(count: number | null): string {
+  if (count === null) return '- items';
+  return count === 1 ? '1 item' : `${count} items`;
 }
 
 function SettingsPage({

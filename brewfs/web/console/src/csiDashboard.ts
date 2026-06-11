@@ -20,6 +20,13 @@ export interface CsiDashboardMetric {
   value: string;
 }
 
+export interface CsiResourceRow {
+  namespace: string;
+  name: string;
+  status: string;
+  detail: string;
+}
+
 export interface CsiDashboardFilters {
   namespace?: string;
   volume?: string;
@@ -32,6 +39,7 @@ export interface CsiResourceStatus {
   count: number | null;
   message: string;
   items: unknown[];
+  rows: CsiResourceRow[];
 }
 
 export interface CsiDashboardResult {
@@ -116,6 +124,7 @@ async function loadResourceStatus(
       count: response.items.length,
       message: `${response.items.length} items`,
       items: response.items,
+      rows: response.items.map((item) => resourceRow(descriptor.key, item)),
     };
   } catch (err: unknown) {
     return resourceErrorOrThrow(descriptor, err);
@@ -128,6 +137,15 @@ function dashboardErrorOrThrow(err: unknown): CsiDashboardResult {
       state: 'unavailable',
       title: 'CSI dashboard unavailable',
       message: 'Enable the CSI dashboard integration before loading Kubernetes resources.',
+      summaryMetrics: [],
+      resources: [],
+    };
+  }
+  if (isKubernetesError(err)) {
+    return {
+      state: 'unavailable',
+      title: 'Kubernetes CSI unavailable',
+      message: err.detail ?? 'Kubernetes resource discovery failed.',
       summaryMetrics: [],
       resources: [],
     };
@@ -153,6 +171,18 @@ function resourceErrorOrThrow(descriptor: CsiResourceDescriptor, err: unknown): 
       count: null,
       message: 'CSI dashboard integration is disabled.',
       items: [],
+      rows: [],
+    };
+  }
+  if (isKubernetesError(err)) {
+    return {
+      key: descriptor.key,
+      title: descriptor.title,
+      state: 'unavailable',
+      count: null,
+      message: err.detail ?? 'Kubernetes resource discovery failed.',
+      items: [],
+      rows: [],
     };
   }
   if (err instanceof ApiError && err.status === 501) {
@@ -163,7 +193,133 @@ function resourceErrorOrThrow(descriptor: CsiResourceDescriptor, err: unknown): 
       count: null,
       message: 'Kubernetes adapter support is not implemented for this resource yet.',
       items: [],
+      rows: [],
     };
   }
   throw err;
+}
+
+function isKubernetesError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 502 && err.code === 'kubernetes_error';
+}
+
+function resourceRow(key: CsiResourceKey, item: unknown): CsiResourceRow {
+  return {
+    namespace: resourceNamespace(item),
+    name: resourceName(item),
+    ...resourceStatus(key, item),
+  };
+}
+
+function resourceName(item: unknown): string {
+  return nestedString(item, ['metadata', 'name']) ?? '-';
+}
+
+function resourceNamespace(item: unknown): string {
+  return nestedString(item, ['metadata', 'namespace']) ?? '-';
+}
+
+function resourceStatus(
+  key: CsiResourceKey,
+  item: unknown,
+): Pick<CsiResourceRow, 'status' | 'detail'> {
+  if (key === 'storageclasses') {
+    const provisioner = nestedString(item, ['provisioner']) ?? '-';
+    return {
+      status: provisioner,
+      detail: provisioner === '-' ? '-' : `provisioner ${provisioner}`,
+    };
+  }
+
+  if (key === 'persistentvolumes') {
+    const phase = nestedString(item, ['status', 'phase']) ?? '-';
+    const storageClass = nestedString(item, ['spec', 'storageClassName']);
+    const claimNamespace = nestedString(item, ['spec', 'claimRef', 'namespace']);
+    const claimName = nestedString(item, ['spec', 'claimRef', 'name']);
+    const handle = nestedString(item, ['spec', 'csi', 'volumeHandle']);
+    const claim = claimName
+      ? `claim ${claimNamespace ? `${claimNamespace}/` : ''}${claimName}`
+      : null;
+    return {
+      status: phase,
+      detail: joinDetails([
+        storageClass ? `storageClass ${storageClass}` : null,
+        claim,
+        handle ? `handle ${handle}` : null,
+      ]),
+    };
+  }
+
+  if (key === 'persistentvolumeclaims') {
+    const phase = nestedString(item, ['status', 'phase']);
+    const storageClass = nestedString(item, ['spec', 'storageClassName']);
+    const volumeName = nestedString(item, ['spec', 'volumeName']);
+    return {
+      status: phase ?? (volumeName ? 'Bound' : '-'),
+      detail: joinDetails([
+        storageClass ? `storageClass ${storageClass}` : null,
+        volumeName ? `volume ${volumeName}` : null,
+      ]),
+    };
+  }
+
+  const phase = nestedString(item, ['status', 'phase']) ?? '-';
+  const ready = podReadyStatus(item);
+  return {
+    status: joinDetails([phase, ready]),
+    detail: joinDetails(podVolumeDetails(item)),
+  };
+}
+
+function podReadyStatus(item: unknown): string | null {
+  const ready = nestedArray(item, ['status', 'conditions'])?.find(
+    (condition) => nestedString(condition, ['type']) === 'Ready',
+  );
+  const status = nestedString(ready, ['status']);
+  if (status === 'True') return 'Ready';
+  if (status === 'False') return 'NotReady';
+  return null;
+}
+
+function podVolumeDetails(item: unknown): string[] {
+  return (
+    nestedArray(item, ['spec', 'volumes'])
+      ?.map((volume) => {
+        const pvc = nestedString(volume, ['persistentVolumeClaim', 'claimName']);
+        if (pvc) return `pvc ${pvc}`;
+        const driver = nestedString(volume, ['csi', 'driver']);
+        if (driver) return `csi ${driver}`;
+        const name = nestedString(volume, ['name']);
+        return name ? `volume ${name}` : null;
+      })
+      .filter((value): value is string => Boolean(value)) ?? []
+  );
+}
+
+function joinDetails(parts: Array<string | null | undefined>): string {
+  const values = parts.filter((part): part is string => Boolean(part));
+  return values.length > 0 ? values.join(' · ') : '-';
+}
+
+function nestedString(item: unknown, path: string[]): string | null {
+  const value = nestedValue(item, path);
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function nestedArray(item: unknown, path: string[]): unknown[] | null {
+  const value = nestedValue(item, path);
+  return Array.isArray(value) ? value : null;
+}
+
+function nestedValue(item: unknown, path: string[]): unknown {
+  let current = item;
+  for (const segment of path) {
+    if (!isRecord(current)) return null;
+    current = current[segment];
+  }
+  return current;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

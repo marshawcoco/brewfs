@@ -442,6 +442,39 @@ h2 {
   font: inherit;
 }
 
+.csi-resource-list {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.csi-resource-section {
+  display: grid;
+  gap: 8px;
+}
+
+.resource-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.resource-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.resource-heading span {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.csi-resource-table {
+  min-width: 760px;
+}
+
 .browser-context {
   margin: 12px 0 0;
 }
@@ -560,6 +593,11 @@ h2 {
   }
 
   .topbar {
+    flex-direction: column;
+  }
+
+  .resource-heading {
+    align-items: flex-start;
     flex-direction: column;
   }
 
