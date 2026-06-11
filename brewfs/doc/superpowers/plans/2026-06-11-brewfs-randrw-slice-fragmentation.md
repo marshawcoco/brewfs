@@ -986,3 +986,90 @@ Candidate J: bounded cached-origin full-block-first idle cleanup.
   Accept only if direct0 post-drained PUT/GiB improves and same-time direct1
   read/write stays within 5%.
 ```
+
+## Candidate J Result: Bounded Cached-Only Idle Grace
+
+Goal:
+
+- Reduce buffered randrw small-object amplification caused by cached-origin
+  sub-block slices being sealed at the one-second idle point.
+- Keep the direct1 normal-origin path inside the 5% guard band.
+- Bound the grace window so cached-origin dirty backlog cannot wait until the
+  long flush-duration fallback.
+
+Implementation:
+
+- Classify cached sub-block slices with `WriteOriginKind::CachedOnly` instead
+  of `creation_unique != 0`.
+- Defer `AutoFreezeTrigger::Idle` for cached-only sub-block slices for three
+  seconds.
+- Keep pressure, too-many-slices, buffer-high, explicit flush, and
+  flush-duration triggers intact.
+- Added a regression test that verified RED on the old one-second idle freeze
+  and GREEN with bounded grace.
+
+Rejected sub-candidates:
+
+```text
+2s grace artifact: perf-run-1781216256-6008
+  direct0 read/write improved by +11.9%, hard_wait fell by -20.7%, but
+  post-drained PUT/GiB worsened by +2.7%.
+
+1.5s grace artifact: perf-run-1781216930-15683
+  direct0 hard_wait fell by -45.3%, but read/write regressed by about -6%
+  and post-drained PUT/GiB still worsened by +2.3%.
+```
+
+Accepted sub-candidate:
+
+```text
+3s direct0 baseline artifact: perf-run-1781215943-30
+3s direct0 candidate artifact: perf-run-1781217272-13985
+3s direct1 guard baseline artifact: perf-run-1781214273-18491
+3s direct1 guard candidate artifact: perf-run-1781217577-3420
+```
+
+Direct0 result:
+
+```text
+read_bw_mib_s=242.1 vs 231.3 (+4.7%)
+write_bw_mib_s=110.2 vs 105.2 (+4.8%)
+post_write_drain_s=2 vs 16 (-87.5%)
+post-drained put_ops_per_gib_written=1629.0 vs 1996.7 (-18.4%)
+post-drained avg_upload_batch_mib=0.610 vs 0.506 (+20.5%)
+partial_tail_ops=9771 vs 11732 (-16.7%)
+partial_tail_auto_idle_ops=5034 vs 8443 (-40.4%)
+writeback_hard_wait_ms=17.88M vs 19.87M (-10.0%)
+```
+
+Direct1 guard result:
+
+```text
+read_bw_mib_s=189.3 vs 182.5 (+3.8%)
+write_bw_mib_s=85.7 vs 83.1 (+3.2%)
+post_write_drain_s=20 vs 21 (-4.8%)
+post-drained put_ops_per_gib_written=256.8 vs 258.2 (-0.5%)
+post-drained avg_upload_batch_mib=4.116 vs 4.107 (+0.2%)
+partial_tail_ops=32 vs 38 (-15.8%)
+writeback_hard_wait_ms=209.7k vs 220.2k (-4.7%)
+```
+
+Decision:
+
+- Accept Candidate J with a three-second cached-only sub-block idle grace.
+- This keeps the direct1 guard within the configured 5% band while improving
+  buffered randrw throughput, drain time, object count, and partial-tail count.
+- Residual risk: direct0 run still reported a small number of best-effort
+  writeback stage failures. These have appeared in previous guard runs and are
+  logged as skipped SSD persist rather than foreground I/O errors, but the next
+  round should add clearer failure-cause attribution.
+
+Next target:
+
+```text
+Candidate K: reduce direct0 explicit-flush/too-many spillover after the 3s
+cached-idle grace. The 3s candidate cuts idle tails but still shifts some
+freezes to TooMany and ExplicitFlush. Inspect slice ordering and cached-origin
+batch selection so delayed cached tails are drained in larger, older-first
+groups without increasing hard_wait.
+```
