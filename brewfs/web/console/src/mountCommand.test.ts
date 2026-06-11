@@ -45,6 +45,38 @@ describe('buildMountCommand', () => {
     expect(result.warnings).toEqual(['Meta URL is redacted; provide the real value before running.']);
   });
 
+  it('uses backend-specific placeholders for redacted etcd and tikv endpoints', () => {
+    const etcdResult = buildMountCommand(
+      volume({
+        meta_backend: 'etcd',
+        meta_url_redacted: 'http://127.0.0.1:2379',
+      }),
+    );
+    const tikvResult = buildMountCommand(
+      volume({
+        meta_backend: 'tikv',
+        meta_url_redacted: '127.0.0.1:2379',
+      }),
+    );
+
+    expect(etcdResult.command).toContain("--meta-etcd-urls '<redacted-etcd-urls>'");
+    expect(tikvResult.command).toContain("--meta-tikv-pd-endpoints '<redacted-tikv-pd-endpoints>'");
+  });
+
+  it('warns when the stored fields are not enough to mount an S3 data backend', () => {
+    const result = buildMountCommand(
+      volume({
+        data_backend: 's3',
+        data_dir: null,
+      }),
+    );
+
+    expect(result.command).toContain('--data-backend s3');
+    expect(result.warnings).toContain(
+      'S3 bucket and endpoint options are not stored yet; add them before running.',
+    );
+  });
+
   it('quotes shell arguments containing single quotes', () => {
     const result = buildMountCommand(
       volume({

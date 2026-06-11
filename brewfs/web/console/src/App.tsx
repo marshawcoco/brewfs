@@ -540,6 +540,7 @@ export function App() {
   const copyMountCommand = async (volume: VolumeResponse) => {
     const { command } = buildMountCommand(volume);
     if (!navigator.clipboard) {
+      setCopiedMountCommandVolumeId(null);
       setMountCommandError('Clipboard API is unavailable in this browser.');
       return;
     }
@@ -553,7 +554,9 @@ export function App() {
       }, 1500);
     } catch (err: unknown) {
       setCopiedMountCommandVolumeId(null);
-      setMountCommandError(err instanceof Error ? err.message : 'copy failed');
+      setMountCommandError(
+        err instanceof Error ? `Unable to copy mount command: ${err.message}` : 'Unable to copy mount command.',
+      );
     }
   };
 
