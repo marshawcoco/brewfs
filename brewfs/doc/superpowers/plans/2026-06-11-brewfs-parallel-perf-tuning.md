@@ -247,3 +247,25 @@ Result:
 Decision: reverted.
 
 Reason: the cap avoids the Attempt 1 soft-sleep explosion and improves `fio-randrw-direct1`, but the change is still not safe as a default. `fio-randrw-direct0` write p99/p99.9 regressed far beyond the 25% tail gate, `fio-randwrite-direct0` p99 doubled, and `fio-seqwrite-direct0` throughput regressed by 8.1%. This suggests admission-only tweaks are trading where latency appears instead of removing the underlying upload/drain bottleneck. Next write-path work should target upload queueing, object count, or slice aggregation rather than more soft admission tuning.
+
+### Attempt 3: Writeback Upload Concurrency 6
+
+Candidate: run the same writeback throughput matrix with `BREWFS_WRITEBACK_UPLOAD_CONCURRENCY=6` instead of the profile default `4`.
+Branch: `codex/perf-tune-integration`
+Commit: none; configuration-only experiment.
+Touched files: none.
+Perf artifact baseline: `brewfs/docker/compose-xfstests/artifacts/perf-run-1781173824-24909`
+Perf artifact candidate: `brewfs/docker/compose-xfstests/artifacts/perf-run-1781177224-18180`
+
+Partial result before aborting the rejected run:
+
+| Tool | Metric | Baseline | Candidate | Delta |
+| --- | --- | ---: | ---: | ---: |
+| `fio-seqwrite-direct0` | fio seconds | 56 | 52 | -7.1% |
+| `fio-seqwrite-direct0` | post-write drain seconds | 13 | 17 | +30.8% |
+| `fio-seqwrite-direct1` | fio seconds | 33 | 31 | -6.1% |
+| `fio-seqwrite-direct1` | post-write drain seconds | 8 | 15 | +87.5% |
+
+Decision: rejected; no code or default config change.
+
+Reason: raising global writeback upload concurrency from 4 to 6 made active fio time slightly shorter but moved more cost into post-write drain. Both seqwrite direct modes exceeded the 10% drain regression gate before the run reached `fio-randrw`, so the run was stopped early. This suggests simply widening the global writeback PUT pool increases burstiness rather than improving end-to-end writeback completion. The next candidate should reduce object/slice amplification or improve drain scheduling fairness, not only raise concurrency.
