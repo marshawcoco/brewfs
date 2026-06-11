@@ -181,3 +181,49 @@ Decision:
 - Accept Candidate A.
 - It improves buffered random write fragmentation and does not show a stable direct I/O regression.
 - Next optimization target: reduce `direct0` auto/explicit flush partial-tail uploads while preserving direct1 batch shape and drain behavior.
+
+## Candidate B Result
+
+Hypothesis:
+
+- Make background `flush_once()` non-strict so it does not seal sub-block tails.
+- Delay cached-writeback sub-block `auto_flush` until the 5s safety age or memory pressure.
+- Keep strict `flush()/fsync()/truncate()/close` semantics unchanged.
+
+Artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781200659-21772
+```
+
+Post-drained diagnostics versus Candidate A:
+
+```text
+direct0:
+  s3_put_ops=8473 vs 11180
+  fuse_write_mib=6484.0 vs 7000.0
+  s3_put_ops_per_gib_written=1338.1 vs 1635.5
+  avg_upload_batch_mib=0.711 vs 0.626
+  partial_tail_ratio=0.903 vs 0.932
+  freeze_size/max_unflushed/explicit_flush/auto=58/136/372/7630
+  write_bw_mib_s=89.8 vs 115.2
+  post_write_drain_s=4 vs 5
+
+direct1:
+  s3_put_ops_per_gib_written=308.0 vs 308.1
+  avg_upload_batch_mib=4.151 vs 4.092
+  partial_tail_ratio=0.015 vs 0.028
+  write_bw_mib_s=56.0 vs 56.7
+  post_write_drain_s=46 vs 27
+```
+
+Decision:
+
+- Reject Candidate B.
+- It reduced PUT/object amplification, but direct0 write bandwidth regressed by about 22% and direct1 post-write drain regressed by about 70%.
+- The rollback keeps Candidate A as the current accepted code.
+
+Interpretation:
+
+- Delaying cached sub-block sealing too broadly shifts cost into dirty/backpressure queues: `writeback_hard_wait_ms` grew from about 9.3M to 28.4M in direct0.
+- The next attempt should avoid holding dirty data longer globally. Prefer either per-reason metrics first, or a narrower change that reduces object count without increasing recent-pending hard waits.
