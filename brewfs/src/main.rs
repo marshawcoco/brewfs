@@ -1,5 +1,6 @@
 mod cadapter;
 mod chunk;
+mod console;
 mod control;
 mod daemon;
 #[allow(dead_code)]
