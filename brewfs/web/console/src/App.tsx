@@ -40,6 +40,7 @@ import {
   updateVolume,
 } from './api';
 import { formatMode, joinBrowserPath, normalizeBrowserPath, parentBrowserPath } from './browserPath';
+import { loadCsiDashboard, type CsiDashboardResult } from './csiDashboard';
 import { loadFeatureStatus, type FeatureKey, type FeatureStatus } from './featureStatus';
 import { loadInstanceDetails } from './instanceDetails';
 import { buildMountCommand } from './mountCommand';
@@ -127,7 +128,7 @@ function pageFromPathname(pathname: string): PageKey {
 }
 
 function featureForPage(page: PageKey): FeatureKey | null {
-  if (page === 'trash' || page === 'acl' || page === 'csi') {
+  if (page === 'trash' || page === 'acl') {
     return page;
   }
   return null;
@@ -172,6 +173,9 @@ export function App() {
   const [featureResult, setFeatureResult] = useState<FeatureResult | null>(null);
   const [featureLoading, setFeatureLoading] = useState(false);
   const [featureError, setFeatureError] = useState<string | null>(null);
+  const [csiDashboard, setCsiDashboard] = useState<CsiDashboardResult | null>(null);
+  const [csiLoading, setCsiLoading] = useState(false);
+  const [csiError, setCsiError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -349,6 +353,38 @@ export function App() {
       cancelled = true;
     };
   }, [page, token, volumes]);
+
+  useEffect(() => {
+    if (page !== 'csi') return;
+    let cancelled = false;
+
+    setCsiLoading(true);
+    setCsiError(null);
+    setCsiDashboard(null);
+    void loadCsiDashboard(token)
+      .then((result) => {
+        if (!cancelled) {
+          setCsiDashboard(result);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) {
+          setAuthRequired(true);
+        } else {
+          setCsiError(err instanceof Error ? err.message : 'CSI dashboard request failed');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCsiLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [page, token]);
 
   const navigate = (nextPage: PageKey) => {
     setPage(nextPage);
@@ -683,6 +719,9 @@ export function App() {
               featureResult,
               featureLoading,
               featureError,
+              csiDashboard,
+              csiLoading,
+              csiError,
               onVolumeFormChange: updateVolumeForm,
               onVolumeSubmit: submitVolume,
               onVolumeEditStart: startVolumeEdit,
@@ -776,6 +815,9 @@ type RenderContext = {
   featureResult: FeatureResult | null;
   featureLoading: boolean;
   featureError: string | null;
+  csiDashboard: CsiDashboardResult | null;
+  csiLoading: boolean;
+  csiError: string | null;
   onVolumeFormChange: (field: keyof VolumeFormState, value: string) => void;
   onVolumeSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onVolumeEditStart: (volume: VolumeResponse) => void;
@@ -831,6 +873,9 @@ function renderPage(page: PageKey, context: RenderContext) {
     featureResult,
     featureLoading,
     featureError,
+    csiDashboard,
+    csiLoading,
+    csiError,
     onVolumeFormChange,
     onVolumeSubmit,
     onVolumeEditStart,
@@ -984,15 +1029,7 @@ function renderPage(page: PageKey, context: RenderContext) {
   }
 
   if (page === 'csi') {
-    return (
-      <FeatureStatusPanel
-        feature="csi"
-        fallbackTitle="CSI"
-        result={featureResult}
-        loading={featureLoading}
-        error={featureError}
-      />
-    );
+    return <CsiDashboardPage result={csiDashboard} loading={csiLoading} error={csiError} />;
   }
 
   return <SettingsPage health={health} volumes={volumes} instances={instances} />;
@@ -1023,6 +1060,61 @@ function FeatureStatusPanel({
           <Metric label="State" value={status.state} />
           {status.volumeName ? <Metric label="Filesystem" value={status.volumeName} /> : null}
           <p className="muted feature-message">{status.message}</p>
+        </>
+      ) : null}
+    </article>
+  );
+}
+
+function CsiDashboardPage({
+  result,
+  loading,
+  error,
+}: {
+  result: CsiDashboardResult | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <article className="panel table-panel">
+      <h2>{result?.title ?? 'CSI dashboard'}</h2>
+      {loading && !result ? <p className="muted">Loading CSI resources.</p> : null}
+      {error ? <p className="error-text">{error}</p> : null}
+      {result ? (
+        <>
+          <Metric label="State" value={result.state} />
+          <p className="muted feature-message">{result.message}</p>
+          {result.summaryMetrics.length > 0 ? (
+            <div className="metadata-grid">
+              {result.summaryMetrics.map((metric) => (
+                <Metric key={metric.label} label={metric.label} value={metric.value} />
+              ))}
+            </div>
+          ) : null}
+          {result.resources.length > 0 ? (
+            <div className="table-wrap">
+              <table className="data-table compact-data-table">
+                <thead>
+                  <tr>
+                    <th>Resource</th>
+                    <th>State</th>
+                    <th>Items</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.resources.map((resource) => (
+                    <tr key={resource.key}>
+                      <td>{resource.title}</td>
+                      <td>{resource.state}</td>
+                      <td>{resource.count ?? '-'}</td>
+                      <td>{resource.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </>
       ) : null}
     </article>

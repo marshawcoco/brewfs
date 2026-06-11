@@ -185,6 +185,10 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.compact-data-table {
+  min-width: 680px;
+}
+
 .metric {
   display: flex;
   justify-content: space-between;
