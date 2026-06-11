@@ -206,6 +206,31 @@ mod tests {
         }
     }
 
+    async fn build_mounted_app_with_handler<H>(
+        static_dir: &std::path::Path,
+        handler: H,
+    ) -> (Router, crate::control::server::ControlServer)
+    where
+        H: crate::control::server::ControlHandler,
+    {
+        std::fs::write(static_dir.join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(static_dir, AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let server = crate::control::server::ControlServer::bind(socket_path.clone(), handler)
+            .await
+            .unwrap();
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        (build_router(config), server)
+    }
+
     #[tokio::test]
     async fn health_route_returns_json() {
         let dir = tempdir().unwrap();
@@ -1023,6 +1048,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trash_api_uses_default_control_plane_adapter_when_volume_is_mounted() {
+        let dir = tempdir().unwrap();
+        let (app, _server) = build_mounted_app_with_handler(dir.path(), ReadyFeatureHandler).await;
+        let volume_id = create_live_browser_volume(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}/trash"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["entries"][0]["id"], "trash-1");
+
+        for request in [
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/volumes/{volume_id}/trash/trash-1/restore"))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/volumes/{volume_id}/trash/trash-1"))
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["ok"], true);
+        }
+    }
+
+    #[tokio::test]
     async fn acl_api_returns_unavailable_when_registered_volume_is_not_mounted() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
@@ -1081,6 +1147,68 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "unsupported");
+    }
+
+    #[tokio::test]
+    async fn acl_api_uses_default_control_plane_adapter_when_capability_is_enabled() {
+        let dir = tempdir().unwrap();
+        let (app, _server) = build_mounted_app_with_handler(dir.path(), ReadyFeatureHandler).await;
+        let volume_id = create_live_browser_volume(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}/acl?path=/docs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["entries"][0]["tag"], "user_obj");
+
+        let acl_body = serde_json::json!({
+            "entries": [{
+                "scope": "access",
+                "tag": "group",
+                "id": 1000,
+                "perm": "r-x"
+            }]
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/volumes/{volume_id}/acl?path=/docs"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&acl_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["entries"][0]["tag"], "group");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/volumes/{volume_id}/acl?path=/docs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["ok"], true);
     }
 
     #[tokio::test]
@@ -1397,6 +1525,72 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         created["id"].as_str().unwrap().to_string()
+    }
+
+    struct ReadyFeatureHandler;
+
+    #[async_trait::async_trait]
+    impl crate::control::server::ControlHandler for ReadyFeatureHandler {
+        async fn handle(
+            &self,
+            request: crate::control::protocol::ControlRequest,
+        ) -> crate::control::protocol::ControlResponse {
+            match request {
+                crate::control::protocol::ControlRequest::GetInfo => {
+                    let capabilities = crate::meta::store::MetaStoreCapabilities {
+                        namespace: true,
+                        file_data: true,
+                        acl: true,
+                        ..Default::default()
+                    };
+                    crate::control::protocol::ControlResponse::Info {
+                        pid: std::process::id(),
+                        mount_point: "/mnt/brewfs".to_string(),
+                        started_at: 1_786_000_000_000,
+                        version: "0.1.0-test".to_string(),
+                        meta_backend: "sqlx".to_string(),
+                        capabilities,
+                    }
+                }
+                crate::control::protocol::ControlRequest::GetAcl { path } => {
+                    crate::control::protocol::ControlResponse::Acl {
+                        path,
+                        entries: vec![crate::control::protocol::ControlAclEntry {
+                            scope: "access".to_string(),
+                            tag: "user_obj".to_string(),
+                            id: None,
+                            perm: "rwx".to_string(),
+                        }],
+                    }
+                }
+                crate::control::protocol::ControlRequest::PutAcl { path, entries } => {
+                    crate::control::protocol::ControlResponse::Acl { path, entries }
+                }
+                crate::control::protocol::ControlRequest::DeleteAcl { path } => {
+                    crate::control::protocol::ControlResponse::AclDeleted { path }
+                }
+                crate::control::protocol::ControlRequest::ListTrash => {
+                    crate::control::protocol::ControlResponse::Trash {
+                        entries: vec![crate::control::protocol::ControlTrashEntry {
+                            id: "trash-1".to_string(),
+                            original_path: "/docs/report.txt".to_string(),
+                            size: Some(42),
+                            deleted_at: Some("2026-06-11T12:00:00Z".to_string()),
+                        }],
+                    }
+                }
+                crate::control::protocol::ControlRequest::RestoreTrashEntry { entry_id } => {
+                    crate::control::protocol::ControlResponse::TrashRestored { entry_id }
+                }
+                crate::control::protocol::ControlRequest::DeleteTrashEntry { entry_id } => {
+                    crate::control::protocol::ControlResponse::TrashDeleted { entry_id }
+                }
+                other => crate::control::protocol::ControlResponse::Error {
+                    code: "unexpected".to_string(),
+                    message: format!("unexpected request: {other:?}"),
+                },
+            }
+        }
     }
 
     struct UnsupportedTrashHandler;
