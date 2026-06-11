@@ -470,6 +470,10 @@ where
         })
     }
 
+    fn can_freeze_for_max_unflushed(&self) -> bool {
+        self.with_ref(|s| s.data.len() >= s.data.block_size() as u64)
+    }
+
     fn try_write(&self, offset: u64, buf: &[u8]) -> anyhow::Result<bool> {
         let wrote = self.with_mut(|s| match s.can_write(offset, buf.len()) {
             Some(action) => {
@@ -963,6 +967,7 @@ where
 
             // Prevent slices from remaining unflushed for too long.
             if idx > MAX_UNFLUSHED_SLICES
+                && handle.can_freeze_for_max_unflushed()
                 && handle.freeze_with_reason(SliceFreezeReason::MaxUnflushed)
             {
                 flush.push(slice.clone());
@@ -4429,6 +4434,43 @@ mod tests {
         assert_eq!(after_flush.freeze_explicit_flush_ops, 1);
         assert_eq!(after_flush.upload_batch_ops, 1);
         assert_eq!(after_flush.upload_partial_tail_ops, 1);
+    }
+
+    #[tokio::test]
+    async fn test_max_unflushed_keeps_sub_block_slices_writable() {
+        let layout = ChunkLayout {
+            chunk_size: 64 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "max_unflushed_sub_block.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = Arc::new(DataWriter::new(test_config(layout), backend, reader, None));
+        let file_writer = writer.ensure_file(inode);
+
+        for idx in 0..6u64 {
+            file_writer
+                .write_at(idx * 8 * 1024, &[idx as u8; 1024])
+                .await
+                .unwrap();
+        }
+
+        let breakdown = writer.dirty_breakdown().await;
+        assert_eq!(breakdown.slice_create_ops, 6);
+        assert_eq!(
+            breakdown.freeze_max_unflushed_ops, 0,
+            "max_unflushed should not force sub-block slices into partial-tail uploads"
+        );
     }
 
     #[tokio::test]

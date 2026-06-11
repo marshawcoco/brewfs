@@ -117,3 +117,67 @@ python3 brewfs/tools/perf/compare_artifacts.py \
   <candidate-artifact> \
   --format markdown
 ```
+
+## Candidate A Result
+
+Artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781198447-23355
+```
+
+Post-drained diagnostics:
+
+```text
+direct0:
+  s3_put_ops=11180, s3_put_mib=6600.2, fuse_write_mib=7000.0, byte_amp=0.943
+  upload_batch_ops=11174, avg_upload_batch_mib=0.626, partial_tail_ratio=0.932
+  slice_create_ops=11061, slice_reuse_ops=71217
+  freeze_size/max_unflushed/explicit_flush/auto=59/120/378/10504
+
+direct1:
+  s3_put_ops=1135, s3_put_mib=4239.4, fuse_write_mib=3772.0, byte_amp=1.124
+  upload_batch_ops=916, avg_upload_batch_mib=4.092, partial_tail_ratio=0.028
+  slice_create_ops=768, slice_reuse_ops=3004
+  freeze_size/max_unflushed/explicit_flush/auto=8/81/86/593
+```
+
+Movement versus baseline:
+
+- `direct0` max-unflushed freezes dropped from 11,128 to 120 (-98.9%).
+- `direct0` S3 PUT count dropped from 12,970 to 11,180 while fio wrote 16.7% more data.
+- `direct0` S3 PUTs per GiB written improved from about 2,215 to 1,636 (-26.1%).
+- `direct0` average upload batch size improved from 0.462 MiB to 0.626 MiB (+35.5%).
+- `direct0` write bandwidth improved from 84.5 MiB/s to 115.2 MiB/s (+36.2%).
+- `direct1` write bandwidth moved from 59.5 MiB/s to 56.7 MiB/s (-4.7%), drain improved from 32s to 27s, and write p99 improved from 10.4s to 7.9s.
+- `direct1` read bandwidth was -5.6%, just outside the planned 5% guard band, so run a direct1-only guard before accepting the code.
+
+Interpretation:
+
+- Candidate A is directionally effective for buffered randrw: it converts premature `max_unflushed` partial-tail freezes into slice reuse and larger uploads.
+- Remaining `direct0` partial-tail ratio is still high at 93.2%, so the next bottleneck is auto/explicit flush of sub-block tails rather than `max_unflushed`.
+- Direct I/O must remain protected in follow-up work; the current result is close enough to the guard band to require a direct1 repeat before commit.
+
+Direct1 guard artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781199012-6131
+```
+
+Guard result versus baseline:
+
+```text
+direct1:
+  read_bw_mib_s=190.4 vs 129.4 (+47.1%)
+  write_bw_mib_s=85.9 vs 59.5 (+44.5%)
+  post_write_drain_s=18 vs 32 (-43.8%)
+  s3_put_ops_per_gib_written=258.6 vs 304.3 (-15.0%)
+  avg_upload_batch_mib=4.091 vs 4.047 (+1.1%)
+  partial_tail_ratio=0.032 vs 0.032
+```
+
+Decision:
+
+- Accept Candidate A.
+- It improves buffered random write fragmentation and does not show a stable direct I/O regression.
+- Next optimization target: reduce `direct0` auto/explicit flush partial-tail uploads while preserving direct1 batch shape and drain behavior.
