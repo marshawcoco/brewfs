@@ -6,16 +6,19 @@ import {
   Gauge,
   LogIn,
   HardDrive,
+  Pencil,
   RefreshCw,
   Settings,
   ShieldCheck,
   Trash2,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import {
   ApiError,
   createVolume,
+  deleteVolume as deleteVolumeRequest,
   fetchJobStatus,
   fetchHealth,
   fetchInstances,
@@ -26,9 +29,11 @@ import {
   type InstanceResponse,
   type JobStatusResponse,
   type VolumeResponse,
+  updateVolume,
 } from './api';
 import { loadFeatureStatus, type FeatureKey, type FeatureStatus } from './featureStatus';
 import { loadInstanceDetails } from './instanceDetails';
+import { labelsFromText, labelsToText } from './volumeEdit';
 
 type PageKey =
   | 'overview'
@@ -71,6 +76,12 @@ type VolumeFormState = {
   data_dir: string;
   meta_backend: string;
   meta_url: string;
+};
+
+type VolumeEditFormState = {
+  name: string;
+  description: string;
+  labels: string;
 };
 
 const emptyVolumeForm: VolumeFormState = {
@@ -125,6 +136,10 @@ export function App() {
   const [volumeForm, setVolumeForm] = useState<VolumeFormState>(emptyVolumeForm);
   const [creatingVolume, setCreatingVolume] = useState(false);
   const [createVolumeError, setCreateVolumeError] = useState<string | null>(null);
+  const [editingVolumeId, setEditingVolumeId] = useState<string | null>(null);
+  const [editVolumeForm, setEditVolumeForm] = useState<VolumeEditFormState | null>(null);
+  const [volumeActionInFlight, setVolumeActionInFlight] = useState(false);
+  const [volumeActionError, setVolumeActionError] = useState<string | null>(null);
   const [selectedJobPid, setSelectedJobPid] = useState<number | null>(null);
   const [gcDryRun, setGcDryRun] = useState(true);
   const [jobRequestInFlight, setJobRequestInFlight] = useState(false);
@@ -310,6 +325,82 @@ export function App() {
     }
   };
 
+  const startVolumeEdit = (volume: VolumeResponse) => {
+    setEditingVolumeId(volume.id);
+    setEditVolumeForm({
+      name: volume.name,
+      description: volume.description ?? '',
+      labels: labelsToText(volume.labels),
+    });
+    setVolumeActionError(null);
+  };
+
+  const updateVolumeEditForm = (field: keyof VolumeEditFormState, value: string) => {
+    setEditVolumeForm((current) => (current ? { ...current, [field]: value } : current));
+  };
+
+  const cancelVolumeEdit = () => {
+    setEditingVolumeId(null);
+    setEditVolumeForm(null);
+    setVolumeActionError(null);
+  };
+
+  const submitVolumeEdit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingVolumeId || !editVolumeForm) return;
+
+    setVolumeActionInFlight(true);
+    setVolumeActionError(null);
+    try {
+      const labels = labelsFromText(editVolumeForm.labels);
+      const updated = await updateVolume(
+        editingVolumeId,
+        {
+          name: editVolumeForm.name.trim(),
+          description: editVolumeForm.description.trim() || null,
+          labels,
+        },
+        token,
+      );
+      setVolumes((current) =>
+        current.map((volume) => (volume.id === updated.id ? updated : volume)),
+      );
+      setEditingVolumeId(null);
+      setEditVolumeForm(null);
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthRequired(true);
+      } else {
+        setVolumeActionError(err instanceof Error ? err.message : 'volume update failed');
+      }
+    } finally {
+      setVolumeActionInFlight(false);
+    }
+  };
+
+  const deleteVolumeEntry = async (volume: VolumeResponse) => {
+    if (!window.confirm(`Delete registry entry ${volume.name}?`)) return;
+
+    setVolumeActionInFlight(true);
+    setVolumeActionError(null);
+    try {
+      await deleteVolumeRequest(volume.id, token);
+      setVolumes((current) => current.filter((entry) => entry.id !== volume.id));
+      if (editingVolumeId === volume.id) {
+        setEditingVolumeId(null);
+        setEditVolumeForm(null);
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthRequired(true);
+      } else {
+        setVolumeActionError(err instanceof Error ? err.message : 'volume delete failed');
+      }
+    } finally {
+      setVolumeActionInFlight(false);
+    }
+  };
+
   const submitGcJob = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (selectedJobPid === null) return;
@@ -409,6 +500,10 @@ export function App() {
               volumeForm,
               creatingVolume,
               createVolumeError,
+              editingVolumeId,
+              editVolumeForm,
+              volumeActionInFlight,
+              volumeActionError,
               selectedJobPid,
               gcDryRun,
               jobRequestInFlight,
@@ -419,6 +514,11 @@ export function App() {
               featureError,
               onVolumeFormChange: updateVolumeForm,
               onVolumeSubmit: submitVolume,
+              onVolumeEditStart: startVolumeEdit,
+              onVolumeEditFormChange: updateVolumeEditForm,
+              onVolumeEditSubmit: submitVolumeEdit,
+              onVolumeEditCancel: cancelVolumeEdit,
+              onVolumeDelete: deleteVolumeEntry,
               onSelectedJobPidChange: setSelectedJobPid,
               onGcDryRunChange: setGcDryRun,
               onGcJobSubmit: submitGcJob,
@@ -475,6 +575,10 @@ type RenderContext = {
   volumeForm: VolumeFormState;
   creatingVolume: boolean;
   createVolumeError: string | null;
+  editingVolumeId: string | null;
+  editVolumeForm: VolumeEditFormState | null;
+  volumeActionInFlight: boolean;
+  volumeActionError: string | null;
   selectedJobPid: number | null;
   gcDryRun: boolean;
   jobRequestInFlight: boolean;
@@ -485,6 +589,11 @@ type RenderContext = {
   featureError: string | null;
   onVolumeFormChange: (field: keyof VolumeFormState, value: string) => void;
   onVolumeSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onVolumeEditStart: (volume: VolumeResponse) => void;
+  onVolumeEditFormChange: (field: keyof VolumeEditFormState, value: string) => void;
+  onVolumeEditSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onVolumeEditCancel: () => void;
+  onVolumeDelete: (volume: VolumeResponse) => void;
   onSelectedJobPidChange: (pid: number) => void;
   onGcDryRunChange: (enabled: boolean) => void;
   onGcJobSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -503,6 +612,10 @@ function renderPage(page: PageKey, context: RenderContext) {
     volumeForm,
     creatingVolume,
     createVolumeError,
+    editingVolumeId,
+    editVolumeForm,
+    volumeActionInFlight,
+    volumeActionError,
     selectedJobPid,
     gcDryRun,
     jobRequestInFlight,
@@ -513,6 +626,11 @@ function renderPage(page: PageKey, context: RenderContext) {
     featureError,
     onVolumeFormChange,
     onVolumeSubmit,
+    onVolumeEditStart,
+    onVolumeEditFormChange,
+    onVolumeEditSubmit,
+    onVolumeEditCancel,
+    onVolumeDelete,
     onSelectedJobPidChange,
     onGcDryRunChange,
     onGcJobSubmit,
@@ -569,8 +687,17 @@ function renderPage(page: PageKey, context: RenderContext) {
         form={volumeForm}
         creating={creatingVolume}
         createError={createVolumeError}
+        editingVolumeId={editingVolumeId}
+        editForm={editVolumeForm}
+        actionInFlight={volumeActionInFlight}
+        actionError={volumeActionError}
         onChange={onVolumeFormChange}
         onSubmit={onVolumeSubmit}
+        onEditStart={onVolumeEditStart}
+        onEditFormChange={onVolumeEditFormChange}
+        onEditSubmit={onVolumeEditSubmit}
+        onEditCancel={onVolumeEditCancel}
+        onDelete={onVolumeDelete}
       />
     );
   }
@@ -784,22 +911,41 @@ function FilesystemsPage({
   form,
   creating,
   createError,
+  editingVolumeId,
+  editForm,
+  actionInFlight,
+  actionError,
   onChange,
   onSubmit,
+  onEditStart,
+  onEditFormChange,
+  onEditSubmit,
+  onEditCancel,
+  onDelete,
 }: {
   volumes: VolumeResponse[];
   volumeError: string | null;
   form: VolumeFormState;
   creating: boolean;
   createError: string | null;
+  editingVolumeId: string | null;
+  editForm: VolumeEditFormState | null;
+  actionInFlight: boolean;
+  actionError: string | null;
   onChange: (field: keyof VolumeFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onEditStart: (volume: VolumeResponse) => void;
+  onEditFormChange: (field: keyof VolumeEditFormState, value: string) => void;
+  onEditSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onEditCancel: () => void;
+  onDelete: (volume: VolumeResponse) => void;
 }) {
   return (
     <>
       <article className="panel table-panel">
         <h2>Registered filesystems</h2>
         {volumeError ? <p className="error-text">{volumeError}</p> : null}
+        {actionError ? <p className="error-text">{actionError}</p> : null}
         {volumes.length === 0 ? (
           <p className="muted">No registered filesystems.</p>
         ) : (
@@ -812,6 +958,7 @@ function FilesystemsPage({
                   <th>Meta</th>
                   <th>Mount</th>
                   <th>Meta URL</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -822,6 +969,28 @@ function FilesystemsPage({
                     <td>{volume.mount_config.meta_backend}</td>
                     <td>{volume.mount_config.mount_point ?? '-'}</td>
                     <td>{volume.mount_config.meta_url_redacted ?? '-'}</td>
+                    <td>
+                      <div className="table-actions">
+                        <button
+                          className="secondary-button compact-button"
+                          type="button"
+                          onClick={() => onEditStart(volume)}
+                          disabled={actionInFlight}
+                        >
+                          <Pencil size={14} aria-hidden="true" />
+                          <span>Edit</span>
+                        </button>
+                        <button
+                          className="danger-button compact-button"
+                          type="button"
+                          onClick={() => onDelete(volume)}
+                          disabled={actionInFlight}
+                        >
+                          <Trash2 size={14} aria-hidden="true" />
+                          <span>Delete</span>
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -886,6 +1055,51 @@ function FilesystemsPage({
           </button>
         </form>
       </article>
+
+      {editingVolumeId && editForm ? (
+        <article className="panel">
+          <h2>Edit registry entry</h2>
+          <form className="volume-form" onSubmit={onEditSubmit}>
+            <label>
+              <span>Name</span>
+              <input
+                required
+                value={editForm.name}
+                onChange={(event) => onEditFormChange('name', event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Description</span>
+              <input
+                value={editForm.description}
+                onChange={(event) => onEditFormChange('description', event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Labels</span>
+              <textarea
+                value={editForm.labels}
+                onChange={(event) => onEditFormChange('labels', event.target.value)}
+              />
+            </label>
+            <div className="form-actions">
+              <button className="primary-button" type="submit" disabled={actionInFlight}>
+                <HardDrive size={16} aria-hidden="true" />
+                <span>{actionInFlight ? 'Saving' : 'Save'}</span>
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onEditCancel}
+                disabled={actionInFlight}
+              >
+                <X size={16} aria-hidden="true" />
+                <span>Cancel</span>
+              </button>
+            </div>
+          </form>
+        </article>
+      ) : null}
     </>
   );
 }

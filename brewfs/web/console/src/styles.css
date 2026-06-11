@@ -164,7 +164,7 @@ h2 {
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 760px;
+  min-width: 900px;
   font-size: 14px;
 }
 
@@ -299,6 +299,36 @@ h2 {
   opacity: 0.65;
 }
 
+.danger-button {
+  height: 38px;
+  border: 1px solid #f1b4af;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #ffffff;
+  color: var(--bad);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.compact-button {
+  height: 32px;
+  padding: 0 10px;
+}
+
+.table-actions,
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .volume-form,
 .job-form {
   display: grid;
@@ -319,13 +349,25 @@ h2 {
 
 .volume-form input,
 .volume-form select,
+.volume-form textarea,
 .job-form select {
   min-width: 0;
-  height: 38px;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0 10px;
   font: inherit;
+}
+
+.volume-form input,
+.volume-form select,
+.job-form select {
+  height: 38px;
+}
+
+.volume-form textarea {
+  min-height: 92px;
+  padding: 8px 10px;
+  resize: vertical;
 }
 
 .check-row {
@@ -377,7 +419,8 @@ h2 {
   }
 
   .primary-button,
-  .secondary-button {
+  .secondary-button,
+  .danger-button {
     justify-content: center;
   }
 }
