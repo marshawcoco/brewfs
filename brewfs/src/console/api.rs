@@ -472,56 +472,68 @@ pub async fn read_link(
 }
 
 pub async fn list_trash(
-    Path(_volume_id): Path<String>,
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    ensure_registered_volume_is_mounted_if_present(&state, &volume_id).await?;
     Err(unsupported(
         "trash APIs are not implemented for BrewFS volumes yet",
     ))
 }
 
 pub async fn restore_trash_entry(
-    Path((_volume_id, _entry_id)): Path<(String, String)>,
+    State(state): State<ConsoleState>,
+    Path((volume_id, _entry_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    ensure_registered_volume_is_mounted_if_present(&state, &volume_id).await?;
     Err(unsupported(
         "trash APIs are not implemented for BrewFS volumes yet",
     ))
 }
 
 pub async fn delete_trash_entry(
-    Path((_volume_id, _entry_id)): Path<(String, String)>,
+    State(state): State<ConsoleState>,
+    Path((volume_id, _entry_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    ensure_registered_volume_is_mounted_if_present(&state, &volume_id).await?;
     Err(unsupported(
         "trash APIs are not implemented for BrewFS volumes yet",
     ))
 }
 
 pub async fn get_acl(
-    Path(_volume_id): Path<String>,
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
     Query(query): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    let _path = normalize_absolute_path(query.path.as_deref().unwrap_or("/"))?;
+    ensure_acl_capability(&state, &volume_id).await?;
     Err(unsupported(
-        "ACL APIs are not implemented for BrewFS volumes yet",
+        "ACL control-plane adapter is not implemented yet",
     ))
 }
 
 pub async fn put_acl(
-    Path(_volume_id): Path<String>,
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
     Query(query): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    let _path = normalize_absolute_path(query.path.as_deref().unwrap_or("/"))?;
+    ensure_acl_capability(&state, &volume_id).await?;
     Err(unsupported(
-        "ACL APIs are not implemented for BrewFS volumes yet",
+        "ACL control-plane adapter is not implemented yet",
     ))
 }
 
 pub async fn delete_acl(
-    Path(_volume_id): Path<String>,
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
     Query(query): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    let _path = normalize_absolute_path(query.path.as_deref().unwrap_or("/"))?;
+    ensure_acl_capability(&state, &volume_id).await?;
     Err(unsupported(
-        "ACL APIs are not implemented for BrewFS volumes yet",
+        "ACL control-plane adapter is not implemented yet",
     ))
 }
 
@@ -574,16 +586,25 @@ async fn find_runtime_record_for_volume(
     state: &ConsoleState,
     volume_id: &str,
 ) -> Result<InstanceRecord, ApiErrorResponse> {
-    let volume = state
-        .registry
-        .get(volume_id)
-        .await
-        .map_err(ApiErrorResponse::from)?;
+    find_optional_runtime_record_for_volume(state, volume_id)
+        .await?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "volume not found"))
+}
+
+async fn find_optional_runtime_record_for_volume(
+    state: &ConsoleState,
+    volume_id: &str,
+) -> Result<Option<InstanceRecord>, ApiErrorResponse> {
+    let volume = match state.registry.get(volume_id).await {
+        Ok(volume) => volume,
+        Err(err) if err.code() == "not_found" => return Ok(None),
+        Err(err) => return Err(ApiErrorResponse::from(err)),
+    };
     let mount_point = volume.mount_config.mount_point.ok_or_else(|| {
-        unavailable("registered volume has no mount point; mount it before browsing files")
+        unavailable("registered volume has no mount point; mount it before using runtime-backed console features")
     })?;
 
-    state
+    let record = state
         .runtime_registry
         .list_instances()
         .await
@@ -598,9 +619,69 @@ async fn find_runtime_record_for_volume(
         .find(|record| record.mount_point == mount_point)
         .ok_or_else(|| {
             unavailable(format!(
-                "registered volume is not mounted at {mount_point}; mount it before browsing files"
+                "registered volume is not mounted at {mount_point}; mount it before using runtime-backed console features"
             ))
-        })
+        })?;
+    Ok(Some(record))
+}
+
+async fn ensure_registered_volume_is_mounted_if_present(
+    state: &ConsoleState,
+    volume_id: &str,
+) -> Result<(), ApiErrorResponse> {
+    find_optional_runtime_record_for_volume(state, volume_id)
+        .await
+        .map(|_| ())
+}
+
+async fn ensure_acl_capability(
+    state: &ConsoleState,
+    volume_id: &str,
+) -> Result<(), ApiErrorResponse> {
+    let record = find_runtime_record_for_volume(state, volume_id).await?;
+    let response = send_control_request(&record.socket_path, &ControlRequest::GetInfo).await?;
+    match response {
+        ControlResponse::Info {
+            pid,
+            mount_point,
+            capabilities,
+            ..
+        } => {
+            if pid != record.pid {
+                return Err(json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "control_plane_error",
+                    format!(
+                        "control-plane pid mismatch: requested {}, got {pid}",
+                        record.pid
+                    ),
+                ));
+            }
+            if mount_point != record.mount_point {
+                return Err(json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "control_plane_error",
+                    format!(
+                        "control-plane mount mismatch: requested {}, got {mount_point}",
+                        record.mount_point
+                    ),
+                ));
+            }
+            if capabilities.acl {
+                Ok(())
+            } else {
+                Err(unsupported(
+                    "ACL is not supported by the mounted metadata backend",
+                ))
+            }
+        }
+        ControlResponse::Error { code, message } => Err(control_error_response(&code, &message)),
+        other => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            "control_plane_error",
+            format!("unexpected control-plane response: {other:?}"),
+        )),
+    }
 }
 
 async fn send_control_request(

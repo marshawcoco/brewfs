@@ -48,6 +48,20 @@ describe('loadFeatureStatus', () => {
     expect(status.volumeName).toBe('dev-local');
   });
 
+  it('maps unavailable volume-scoped responses to an unavailable page state', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'unavailable' } }), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const status = await loadFeatureStatus('trash', volumes, 'secret-token');
+
+    expect(status.state).toBe('unavailable');
+    expect(status.volumeName).toBe('dev-local');
+  });
+
   it('loads CSI summary without requiring a registered volume', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(

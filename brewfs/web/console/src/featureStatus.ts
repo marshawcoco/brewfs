@@ -68,6 +68,13 @@ export async function loadFeatureStatus(
 }
 
 function unsupportedOrThrow(err: unknown, title: string): FeatureStatus {
+  if (err instanceof ApiError && err.status === 409) {
+    return {
+      state: 'unavailable',
+      title,
+      message: 'The filesystem is registered but the runtime-dependent capability is unavailable.',
+    };
+  }
   if (err instanceof ApiError && err.status === 501) {
     return {
       state: 'unsupported',

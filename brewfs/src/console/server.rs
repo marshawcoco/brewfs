@@ -770,40 +770,10 @@ mod tests {
         std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
         let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
 
-        let requests = [
-            Request::builder()
-                .uri("/api/volumes/vol-1/trash")
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .method("POST")
-                .uri("/api/volumes/vol-1/trash/trash-1/restore")
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/volumes/vol-1/trash/trash-1")
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .uri("/api/volumes/vol-1/acl?path=/")
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .method("PUT")
-                .uri("/api/volumes/vol-1/acl?path=/")
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/volumes/vol-1/acl?path=/")
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .uri("/api/csi/summary")
-                .body(Body::empty())
-                .unwrap(),
-        ];
+        let requests = [Request::builder()
+            .uri("/api/csi/summary")
+            .body(Body::empty())
+            .unwrap()];
 
         for request in requests {
             let response = app.clone().oneshot(request).await.unwrap();
@@ -816,6 +786,132 @@ mod tests {
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(value["error"]["code"], "unsupported");
         }
+    }
+
+    #[tokio::test]
+    async fn trash_api_reports_unsupported_when_volume_is_mounted() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(dir.path(), AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        let app = build_router(config);
+        let volume_id = create_live_browser_volume(&app).await;
+
+        for request in [
+            Request::builder()
+                .uri(format!("/api/volumes/{volume_id}/trash"))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/volumes/{volume_id}/trash/trash-1/restore"))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/volumes/{volume_id}/trash/trash-1"))
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["code"], "unsupported");
+        }
+    }
+
+    #[tokio::test]
+    async fn trash_api_returns_unavailable_when_registered_volume_is_not_mounted() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
+        let volume_id = create_live_browser_volume(&app).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}/trash"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn acl_api_returns_unavailable_when_registered_volume_is_not_mounted() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
+        let volume_id = create_live_browser_volume(&app).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}/acl?path=/"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn acl_api_reports_backend_without_acl_capability() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(dir.path(), AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let _server =
+            crate::control::server::ControlServer::bind(socket_path.clone(), GetInfoHandler)
+                .await
+                .unwrap();
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        let app = build_router(config);
+        let volume_id = create_live_browser_volume(&app).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}/acl?path=/"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "unsupported");
     }
 
     #[tokio::test]
