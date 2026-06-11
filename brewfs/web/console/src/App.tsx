@@ -4,14 +4,15 @@ import {
   FileSearch,
   FolderTree,
   Gauge,
+  LogIn,
   HardDrive,
   Settings,
   ShieldCheck,
   Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { fetchHealth, type HealthResponse } from './api';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { ApiError, fetchHealth, type HealthResponse } from './api';
 
 type PageKey =
   | 'overview'
@@ -45,6 +46,8 @@ const pagePaths: Record<PageKey, string> = {
   settings: '/settings',
 };
 
+const TOKEN_STORAGE_KEY = 'brewfs.console.token';
+
 function pageTitle(page: PageKey): string {
   return navItems.find((item) => item.key === page)?.label ?? 'Overview';
 }
@@ -59,26 +62,37 @@ function pageFromPathname(pathname: string): PageKey {
 
 export function App() {
   const [page, setPage] = useState<PageKey>(() => pageFromPathname(window.location.pathname));
+  const [token, setToken] = useState<string>(() => sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? '');
+  const [tokenInput, setTokenInput] = useState('');
+  const [authRequired, setAuthRequired] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetchHealth()
+    fetchHealth(token)
       .then((result) => {
         if (!cancelled) {
           setHealth(result);
+          setError(null);
+          setAuthRequired(false);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'health request failed');
+          if (err instanceof ApiError && err.status === 401) {
+            setHealth(null);
+            setError(null);
+            setAuthRequired(true);
+          } else {
+            setError(err instanceof Error ? err.message : 'health request failed');
+          }
         }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [token]);
 
   useEffect(() => {
     const handlePopState = () => setPage(pageFromPathname(window.location.pathname));
@@ -94,11 +108,22 @@ export function App() {
     }
   };
 
+  const submitToken = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextToken = tokenInput.trim();
+    if (!nextToken) return;
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, nextToken);
+    setToken(nextToken);
+    setTokenInput('');
+    setError(null);
+  };
+
   const status = useMemo(() => {
+    if (authRequired) return { label: 'Auth required', tone: 'warn' };
     if (error) return { label: 'API unavailable', tone: 'bad' };
     if (!health) return { label: 'Connecting', tone: 'warn' };
     return { label: `BrewFS ${health.version}`, tone: 'good' };
-  }, [error, health]);
+  }, [authRequired, error, health]);
 
   return (
     <div className="app-shell">
@@ -137,9 +162,48 @@ export function App() {
           <div className={`status-pill ${status.tone}`}>{status.label}</div>
         </header>
 
-        <section className="content-grid">{renderPage(page, health, error)}</section>
+        <section className="content-grid">
+          {authRequired ? (
+            <AuthPanel value={tokenInput} onChange={setTokenInput} onSubmit={submitToken} />
+          ) : (
+            renderPage(page, health, error)
+          )}
+        </section>
       </main>
     </div>
+  );
+}
+
+function AuthPanel({
+  value,
+  onChange,
+  onSubmit,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <article className="panel empty-panel">
+      <h2>Console token required</h2>
+      <form className="auth-form" onSubmit={onSubmit}>
+        <label htmlFor="console-token">Bearer token</label>
+        <div className="input-row">
+          <input
+            id="console-token"
+            className="auth-input"
+            type="password"
+            value={value}
+            autoComplete="current-password"
+            onChange={(event) => onChange(event.target.value)}
+          />
+          <button className="primary-button" type="submit">
+            <LogIn size={16} aria-hidden="true" />
+            <span>Unlock</span>
+          </button>
+        </div>
+      </form>
+    </article>
   );
 }
 

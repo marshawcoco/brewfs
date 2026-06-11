@@ -11,13 +11,29 @@ export interface HealthResponse {
   static_assets_available: boolean;
 }
 
-export async function fetchHealth(): Promise<HealthResponse> {
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export async function fetchHealth(token?: string | null): Promise<HealthResponse> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  const trimmedToken = token?.trim();
+  if (trimmedToken) {
+    headers.Authorization = `Bearer ${trimmedToken}`;
+  }
+
   const response = await fetch('/api/health', {
-    headers: { Accept: 'application/json' },
+    headers,
   });
 
   if (!response.ok) {
-    throw new Error(`health request failed: ${response.status}`);
+    throw new ApiError(`health request failed: ${response.status}`, response.status);
   }
 
   return (await response.json()) as HealthResponse;

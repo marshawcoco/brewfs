@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
   "devDependencies": {
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   }
 }

@@ -20,7 +20,7 @@ pub fn build_router(config: ConsoleConfig) -> Router {
     let api = Router::new()
         .route("/health", get(api::health))
         .fallback(api_not_found)
-        .route_layer(middleware::from_fn_with_state(
+        .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_auth,
         ));
@@ -294,6 +294,42 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn token_auth_protects_unknown_api_routes() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let app = build_router(test_config(
+            dir.path(),
+            AuthConfig::Token {
+                token: "secret".into(),
+            },
+        ));
+
+        let missing_auth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/missing")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

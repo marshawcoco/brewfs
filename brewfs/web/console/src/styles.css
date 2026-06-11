@@ -179,6 +179,45 @@ h2 {
   color: var(--bad);
 }
 
+.auth-form {
+  display: grid;
+  gap: 10px;
+  max-width: 460px;
+}
+
+.auth-form label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.auth-input {
+  min-width: 0;
+  flex: 1;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  font: inherit;
+}
+
+.primary-button {
+  height: 40px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: var(--accent);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -198,5 +237,13 @@ h2 {
 
   .topbar {
     flex-direction: column;
+  }
+
+  .input-row {
+    flex-direction: column;
+  }
+
+  .primary-button {
+    justify-content: center;
   }
 }
