@@ -1,4 +1,5 @@
 pub mod api;
+pub mod csi;
 pub mod registry;
 pub mod server;
 
@@ -68,6 +69,7 @@ pub struct ConsoleState {
     pub registry: VolumeRegistry,
     pub runtime_registry: RuntimeRegistry,
     pub csi_dashboard: bool,
+    pub csi_adapter: Arc<dyn csi::CsiAdapter>,
 }
 
 impl ConsoleConfig {

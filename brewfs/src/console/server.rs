@@ -17,6 +17,7 @@ pub fn build_router(config: ConsoleConfig) -> Router {
         registry: super::registry::VolumeRegistry::new(config.state_dir.clone()),
         runtime_registry: crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone()),
         csi_dashboard: config.csi_dashboard,
+        csi_adapter: super::csi::default_csi_adapter(config.csi_dashboard),
     };
     let api = Router::new()
         .route("/health", get(api::health))

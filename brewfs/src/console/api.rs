@@ -1,5 +1,6 @@
 use super::{
     AuthMode, ConsoleState,
+    csi::CsiAdapterError,
     registry::{
         CreateVolumeRequest, RegistryError, UpdateVolumeRequest,
         VolumeResponse as RegistryVolumeResponse,
@@ -619,40 +620,64 @@ pub async fn delete_acl(
 
 pub async fn csi_summary(
     State(state): State<ConsoleState>,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    csi_adapter_unavailable(&state, "CSI dashboard adapter is not implemented yet")
+) -> Result<Json<super::csi::CsiSummary>, ApiErrorResponse> {
+    ensure_csi_dashboard_enabled(&state)?;
+    state
+        .csi_adapter
+        .summary()
+        .await
+        .map(Json)
+        .map_err(csi_adapter_error)
 }
 
 pub async fn csi_storageclasses(
     State(state): State<ConsoleState>,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    csi_adapter_unavailable(&state, "CSI StorageClass adapter is not implemented yet")
+) -> Result<Json<super::csi::CsiResourceList>, ApiErrorResponse> {
+    ensure_csi_dashboard_enabled(&state)?;
+    state
+        .csi_adapter
+        .storageclasses()
+        .await
+        .map(Json)
+        .map_err(csi_adapter_error)
 }
 
 pub async fn csi_persistentvolumes(
     State(state): State<ConsoleState>,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    csi_adapter_unavailable(
-        &state,
-        "CSI PersistentVolume adapter is not implemented yet",
-    )
+) -> Result<Json<super::csi::CsiResourceList>, ApiErrorResponse> {
+    ensure_csi_dashboard_enabled(&state)?;
+    state
+        .csi_adapter
+        .persistentvolumes()
+        .await
+        .map(Json)
+        .map_err(csi_adapter_error)
 }
 
 pub async fn csi_persistentvolumeclaims(
     State(state): State<ConsoleState>,
-    Query(_query): Query<CsiResourceQuery>,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    csi_adapter_unavailable(
-        &state,
-        "CSI PersistentVolumeClaim adapter is not implemented yet",
-    )
+    Query(query): Query<CsiResourceQuery>,
+) -> Result<Json<super::csi::CsiResourceList>, ApiErrorResponse> {
+    ensure_csi_dashboard_enabled(&state)?;
+    state
+        .csi_adapter
+        .persistentvolumeclaims(&query)
+        .await
+        .map(Json)
+        .map_err(csi_adapter_error)
 }
 
 pub async fn csi_pods(
     State(state): State<ConsoleState>,
-    Query(_query): Query<CsiResourceQuery>,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    csi_adapter_unavailable(&state, "CSI Pod adapter is not implemented yet")
+    Query(query): Query<CsiResourceQuery>,
+) -> Result<Json<super::csi::CsiResourceList>, ApiErrorResponse> {
+    ensure_csi_dashboard_enabled(&state)?;
+    state
+        .csi_adapter
+        .pods(&query)
+        .await
+        .map(Json)
+        .map_err(csi_adapter_error)
 }
 
 async fn send_instance_control_request(
@@ -822,14 +847,18 @@ fn unavailable(message: impl Into<String>) -> ApiErrorResponse {
     json_error(StatusCode::CONFLICT, "unavailable", message)
 }
 
-fn csi_adapter_unavailable(
-    state: &ConsoleState,
-    message: &'static str,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+fn ensure_csi_dashboard_enabled(state: &ConsoleState) -> Result<(), ApiErrorResponse> {
     if state.csi_dashboard {
-        Err(unsupported(message))
+        Ok(())
     } else {
         Err(unavailable("CSI dashboard is disabled"))
+    }
+}
+
+fn csi_adapter_error(err: CsiAdapterError) -> ApiErrorResponse {
+    match err {
+        CsiAdapterError::Disabled => unavailable("CSI dashboard is disabled"),
+        CsiAdapterError::Unsupported(message) => unsupported(message),
     }
 }
 
@@ -982,10 +1011,56 @@ struct ErrorBody {
 mod tests {
     use super::*;
     use crate::{
-        console::{AuthConfig, AuthMode, ConsoleState, registry::VolumeRegistry},
+        console::{
+            AuthConfig, AuthMode, ConsoleState,
+            csi::{CsiAdapter, CsiResourceList, CsiSummary},
+            registry::VolumeRegistry,
+        },
         control::runtime::RuntimeRegistry,
     };
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
+
+    #[derive(Debug)]
+    struct ReadyCsiAdapter;
+
+    #[async_trait::async_trait]
+    impl CsiAdapter for ReadyCsiAdapter {
+        async fn summary(&self) -> Result<CsiSummary, super::super::csi::CsiAdapterError> {
+            Ok(CsiSummary {
+                storageclasses: 1,
+                persistentvolumes: 2,
+                persistentvolumeclaims: 3,
+                pods: 4,
+                unhealthy_mounts: 0,
+            })
+        }
+
+        async fn storageclasses(
+            &self,
+        ) -> Result<CsiResourceList, super::super::csi::CsiAdapterError> {
+            Ok(CsiResourceList::default())
+        }
+
+        async fn persistentvolumes(
+            &self,
+        ) -> Result<CsiResourceList, super::super::csi::CsiAdapterError> {
+            Ok(CsiResourceList::default())
+        }
+
+        async fn persistentvolumeclaims(
+            &self,
+            _query: &CsiResourceQuery,
+        ) -> Result<CsiResourceList, super::super::csi::CsiAdapterError> {
+            Ok(CsiResourceList::default())
+        }
+
+        async fn pods(
+            &self,
+            _query: &CsiResourceQuery,
+        ) -> Result<CsiResourceList, super::super::csi::CsiAdapterError> {
+            Ok(CsiResourceList::default())
+        }
+    }
 
     #[test]
     fn health_response_uses_build_metadata_and_state() {
@@ -996,6 +1071,7 @@ mod tests {
             registry: VolumeRegistry::new(static_dir.join("state")),
             runtime_registry: RuntimeRegistry::new(static_dir.join("runtime")),
             csi_dashboard: true,
+            csi_adapter: Arc::new(ReadyCsiAdapter),
         };
 
         let response = HealthResponse::from_state(&state, true);
@@ -1006,5 +1082,41 @@ mod tests {
         assert_eq!(response.auth_mode, AuthMode::Disabled);
         assert!(response.integrations.csi_dashboard);
         assert!(response.static_assets_available);
+    }
+
+    #[tokio::test]
+    async fn csi_summary_uses_state_adapter() {
+        let static_dir = PathBuf::from("/tmp/brewfs-console-dist");
+        let state = ConsoleState {
+            auth: AuthConfig::Disabled,
+            static_dir: static_dir.clone(),
+            registry: VolumeRegistry::new(static_dir.join("state")),
+            runtime_registry: RuntimeRegistry::new(static_dir.join("runtime")),
+            csi_dashboard: true,
+            csi_adapter: Arc::new(ReadyCsiAdapter),
+        };
+
+        let Json(response) = csi_summary(State(state)).await.unwrap();
+
+        assert_eq!(response.storageclasses, 1);
+        assert_eq!(response.pods, 4);
+    }
+
+    #[tokio::test]
+    async fn csi_summary_respects_disabled_dashboard_even_with_ready_adapter() {
+        let static_dir = PathBuf::from("/tmp/brewfs-console-dist");
+        let state = ConsoleState {
+            auth: AuthConfig::Disabled,
+            static_dir: static_dir.clone(),
+            registry: VolumeRegistry::new(static_dir.join("state")),
+            runtime_registry: RuntimeRegistry::new(static_dir.join("runtime")),
+            csi_dashboard: false,
+            csi_adapter: Arc::new(ReadyCsiAdapter),
+        };
+
+        let err = csi_summary(State(state)).await.unwrap_err();
+
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.code, "unavailable");
     }
 }
