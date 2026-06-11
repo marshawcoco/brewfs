@@ -169,3 +169,45 @@ post-write drain delta:
 Decision: keep / revert
 Reason:
 ```
+
+## Attempt Log
+
+### Attempt 1: Writer Soft-Sleep Recheck
+
+Candidate: recheck pending bytes after every soft backpressure sleep instead of admitting immediately.
+Branch: `codex/perf-tune-writer`
+Commit: `b27460084d555a3a6376af93eb388fecda60d56d`
+Integration commit: `c453ce7`
+Revert commit: `32b7923`
+Touched files: `brewfs/src/vfs/io/writer.rs`
+Targeted tests: `CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs vfs::io::writer --lib` passed, 25 tests.
+Perf artifact baseline: `brewfs/docker/compose-xfstests/artifacts/perf-run-1781173824-24909`
+Perf artifact candidate: `brewfs/docker/compose-xfstests/artifacts/perf-run-1781174643-16097`
+
+Result:
+
+| Tool | Metric | Baseline | Candidate | Delta |
+| --- | --- | ---: | ---: | ---: |
+| `fio-randrw-direct0` | total seconds | 61 | 40 | -34.4% |
+| `fio-randrw-direct0` | post-write drain seconds | 26 | 2 | -92.3% |
+| `fio-randrw-direct0` | read BW MiB/s | 307.72 | 253.32 | -17.7% |
+| `fio-randrw-direct0` | write BW MiB/s | 139.95 | 116.04 | -17.1% |
+| `fio-randrw-direct0` | write p99 ms | 11.47 | 3036.68 | +26377.7% |
+| `fio-randrw-direct0` | write p99.9 ms | 40.11 | 8791.26 | +21819.0% |
+| `fio-randrw-direct1` | total seconds | 70 | 44 | -37.1% |
+| `fio-randrw-direct1` | post-write drain seconds | 40 | 20 | -50.0% |
+| `fio-randrw-direct1` | read BW MiB/s | 235.44 | 213.63 | -9.3% |
+| `fio-randrw-direct1` | write BW MiB/s | 108.60 | 98.48 | -9.3% |
+| `fio-randrw-direct1` | write p99 ms | 193.99 | 242.22 | +24.9% |
+| `fio-randrw-direct1` | write p99.9 ms | 16844.33 | 15770.58 | -6.4% |
+| `fio-randwrite-direct0` | total seconds | 71 | 42 | -40.8% |
+| `fio-randwrite-direct0` | write BW MiB/s | 77.89 | 88.10 | +13.1% |
+| `fio-randwrite-direct0` | write p99 ms | 50.07 | 11609.83 | +23087.4% |
+| `fio-randwrite-direct1` | total seconds | 83 | 57 | -31.3% |
+| `fio-randwrite-direct1` | write BW MiB/s | 66.42 | 55.84 | -15.9% |
+| `fio-seqwrite-direct0` | total seconds | 69 | 47 | -31.9% |
+| `fio-seqwrite-direct1` | total seconds | 41 | 43 | +4.9% |
+
+Decision: reverted.
+
+Reason: the candidate correctly reduced pending-upload overshoot and hard waits, but did so by turning soft backpressure into millions of foreground sleeps. That improved post-write drain and total wall time for several write workloads, but violated the acceptance gate by regressing `fio-randrw` active read/write throughput by more than 5% and causing severe `direct=0` write tail regressions. A follow-up candidate must cap or budget soft rechecks instead of looping until pending bytes drain.
