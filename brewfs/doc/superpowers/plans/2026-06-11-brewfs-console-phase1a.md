@@ -71,7 +71,7 @@ brewfs/web/console/dist/
 Run:
 
 ```bash
-cargo metadata --no-deps -p brewfs
+cargo metadata --no-deps --format-version 1
 ```
 
 Expected: command succeeds and includes `axum`, `tower-http`, and `tower` in the brewfs package dependency lists.
