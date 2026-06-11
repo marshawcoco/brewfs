@@ -374,6 +374,18 @@ h2 {
   margin-bottom: 10px;
 }
 
+.metadata-path,
+.metadata-target {
+  margin-bottom: 12px;
+  word-break: break-word;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
 .volume-form,
 .job-form {
   display: grid;

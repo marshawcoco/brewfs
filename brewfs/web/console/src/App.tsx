@@ -21,12 +21,15 @@ import {
   createVolume,
   deleteVolume as deleteVolumeRequest,
   fetchFileList,
+  fetchFileStat,
   fetchJobStatus,
   fetchHealth,
   fetchInstances,
   fetchVolumes,
+  fetchReadLink,
   runGcJob,
   type FileListResponse,
+  type FileStatResponse,
   type HealthResponse,
   type InstanceInfoResponse,
   type InstanceResponse,
@@ -156,6 +159,10 @@ export function App() {
   const [browserResult, setBrowserResult] = useState<FileListResponse | null>(null);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserError, setBrowserError] = useState<string | null>(null);
+  const [browserMetadata, setBrowserMetadata] = useState<FileStatResponse | null>(null);
+  const [browserLinkTarget, setBrowserLinkTarget] = useState<string | null>(null);
+  const [browserMetadataLoading, setBrowserMetadataLoading] = useState(false);
+  const [browserMetadataError, setBrowserMetadataError] = useState<string | null>(null);
   const [featureResult, setFeatureResult] = useState<FeatureResult | null>(null);
   const [featureLoading, setFeatureLoading] = useState(false);
   const [featureError, setFeatureError] = useState<string | null>(null);
@@ -255,7 +262,10 @@ export function App() {
   useEffect(() => {
     setBrowserResult(null);
     setBrowserError(null);
-  }, [selectedBrowserVolumeId]);
+    setBrowserMetadata(null);
+    setBrowserLinkTarget(null);
+    setBrowserMetadataError(null);
+  }, [browserPath, selectedBrowserVolumeId]);
 
   useEffect(() => {
     if (page !== 'browser') return;
@@ -369,6 +379,35 @@ export function App() {
 
   const refreshBrowser = () => {
     setBrowserReloadKey((current) => current + 1);
+  };
+
+  const inspectBrowserPath = async (path: string) => {
+    if (!selectedBrowserVolumeId) return;
+
+    const normalized = normalizeBrowserPath(path);
+    setBrowserMetadataLoading(true);
+    setBrowserMetadataError(null);
+    setBrowserMetadata(null);
+    setBrowserLinkTarget(null);
+    try {
+      const stat = await fetchFileStat(selectedBrowserVolumeId, normalized, token);
+      let target: string | null = null;
+      if (stat.kind === 'symlink') {
+        const link = await fetchReadLink(selectedBrowserVolumeId, normalized, token);
+        target = link.target;
+      }
+      setBrowserMetadata(stat);
+      setBrowserLinkTarget(target);
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthRequired(true);
+      } else {
+        setBrowserMetadata(null);
+        setBrowserMetadataError(browserErrorMessage(err));
+      }
+    } finally {
+      setBrowserMetadataLoading(false);
+    }
   };
 
   const submitToken = (event: FormEvent<HTMLFormElement>) => {
@@ -606,6 +645,10 @@ export function App() {
               browserResult,
               browserLoading,
               browserError,
+              browserMetadata,
+              browserLinkTarget,
+              browserMetadataLoading,
+              browserMetadataError,
               featureResult,
               featureLoading,
               featureError,
@@ -625,6 +668,7 @@ export function App() {
               onBrowserPathSubmit: submitBrowserPath,
               onBrowserRefresh: refreshBrowser,
               onBrowserNavigate: navigateBrowserPath,
+              onBrowserInspect: inspectBrowserPath,
             })
           )}
         </section>
@@ -691,6 +735,10 @@ type RenderContext = {
   browserResult: FileListResponse | null;
   browserLoading: boolean;
   browserError: string | null;
+  browserMetadata: FileStatResponse | null;
+  browserLinkTarget: string | null;
+  browserMetadataLoading: boolean;
+  browserMetadataError: string | null;
   featureResult: FeatureResult | null;
   featureLoading: boolean;
   featureError: string | null;
@@ -710,6 +758,7 @@ type RenderContext = {
   onBrowserPathSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onBrowserRefresh: () => void;
   onBrowserNavigate: (path: string) => void;
+  onBrowserInspect: (path: string) => void;
 };
 
 function renderPage(page: PageKey, context: RenderContext) {
@@ -738,6 +787,10 @@ function renderPage(page: PageKey, context: RenderContext) {
     browserResult,
     browserLoading,
     browserError,
+    browserMetadata,
+    browserLinkTarget,
+    browserMetadataLoading,
+    browserMetadataError,
     featureResult,
     featureLoading,
     featureError,
@@ -757,6 +810,7 @@ function renderPage(page: PageKey, context: RenderContext) {
     onBrowserPathSubmit,
     onBrowserRefresh,
     onBrowserNavigate,
+    onBrowserInspect,
   } = context;
 
   if (page === 'overview') {
@@ -850,11 +904,16 @@ function renderPage(page: PageKey, context: RenderContext) {
         result={browserResult}
         loading={browserLoading}
         error={browserError}
+        metadata={browserMetadata}
+        linkTarget={browserLinkTarget}
+        metadataLoading={browserMetadataLoading}
+        metadataError={browserMetadataError}
         onVolumeChange={onBrowserVolumeChange}
         onPathInputChange={onBrowserPathInputChange}
         onPathSubmit={onBrowserPathSubmit}
         onRefresh={onBrowserRefresh}
         onNavigate={onBrowserNavigate}
+        onInspect={onBrowserInspect}
       />
     );
   }
@@ -941,11 +1000,16 @@ function BrowserPage({
   result,
   loading,
   error,
+  metadata,
+  linkTarget,
+  metadataLoading,
+  metadataError,
   onVolumeChange,
   onPathInputChange,
   onPathSubmit,
   onRefresh,
   onNavigate,
+  onInspect,
 }: {
   volumes: VolumeResponse[];
   selectedVolume: VolumeResponse | null;
@@ -953,11 +1017,16 @@ function BrowserPage({
   result: FileListResponse | null;
   loading: boolean;
   error: string | null;
+  metadata: FileStatResponse | null;
+  linkTarget: string | null;
+  metadataLoading: boolean;
+  metadataError: string | null;
   onVolumeChange: (volumeId: string) => void;
   onPathInputChange: (path: string) => void;
   onPathSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onRefresh: () => void;
   onNavigate: (path: string) => void;
+  onInspect: (path: string) => void;
 }) {
   if (volumes.length === 0) {
     return <EmptyPanel title="No registered filesystems" detail="Register a filesystem first." />;
@@ -1058,19 +1127,28 @@ function BrowserPage({
                     </td>
                     <td>{entry.mtime}</td>
                     <td>
-                      {entry.kind === 'directory' ? (
+                      <div className="table-actions">
                         <button
                           className="secondary-button compact-button"
                           type="button"
-                          onClick={() => onNavigate(joinBrowserPath(result.path, entry.name))}
-                          disabled={loading}
+                          onClick={() => onInspect(joinBrowserPath(result.path, entry.name))}
+                          disabled={loading || metadataLoading}
                         >
-                          <FolderTree size={14} aria-hidden="true" />
-                          <span>Open</span>
+                          <FileSearch size={14} aria-hidden="true" />
+                          <span>Inspect</span>
                         </button>
-                      ) : (
-                        <span className="muted">-</span>
-                      )}
+                        {entry.kind === 'directory' ? (
+                          <button
+                            className="secondary-button compact-button"
+                            type="button"
+                            onClick={() => onNavigate(joinBrowserPath(result.path, entry.name))}
+                            disabled={loading || metadataLoading}
+                          >
+                            <FolderTree size={14} aria-hidden="true" />
+                            <span>Open</span>
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1078,6 +1156,30 @@ function BrowserPage({
             </table>
           </div>
         ) : null}
+      </article>
+
+      <article className="panel">
+        <h2>Metadata</h2>
+        {metadataLoading ? <p className="muted">Loading metadata.</p> : null}
+        {metadataError ? <p className="error-text">{metadataError}</p> : null}
+        {metadata ? (
+          <>
+            <p className="muted metadata-path">{metadata.path}</p>
+            <div className="metadata-grid">
+              <Metric label="Type" value={metadata.kind} />
+              <Metric label="Inode" value={String(metadata.inode)} />
+              <Metric label="Size" value={String(metadata.size)} />
+              <Metric label="Mode" value={formatMode(metadata.mode)} />
+              <Metric label="Owner" value={`${metadata.uid}:${metadata.gid}`} />
+              <Metric label="Modified" value={metadata.mtime} />
+            </div>
+            {linkTarget ? (
+              <p className="muted metadata-target">target: {linkTarget}</p>
+            ) : null}
+          </>
+        ) : metadataLoading || metadataError ? null : (
+          <p className="muted">No entry selected.</p>
+        )}
       </article>
     </>
   );
