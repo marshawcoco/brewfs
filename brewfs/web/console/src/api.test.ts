@@ -519,6 +519,29 @@ describe('unsupported feature API contracts', () => {
     });
   });
 
+  it('preserves backend error codes on ApiError', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 'control_plane_error',
+            message: 'control-plane request timed out',
+          },
+        }),
+        {
+          status: 502,
+          headers: { 'content-type': 'application/json' },
+        },
+      ),
+    );
+
+    await expect(fetchTrash('vol-1', 'secret-token')).rejects.toMatchObject({
+      status: 502,
+      code: 'control_plane_error',
+      detail: 'control-plane request timed out',
+    } satisfies Partial<ApiError>);
+  });
+
   it('sends ACL reads and writes through stable endpoints', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ error: { code: 'unsupported' } }), {

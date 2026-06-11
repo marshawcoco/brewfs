@@ -184,11 +184,20 @@ export interface UpdateVolumeRequest {
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly code: string | null;
+  readonly detail: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    code: string | null = null,
+    detail: string | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -197,7 +206,7 @@ export async function fetchHealth(token?: string | null): Promise<HealthResponse
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'health request failed');
+  await assertOk(response, 'health request failed');
 
   return (await response.json()) as HealthResponse;
 }
@@ -207,7 +216,7 @@ export async function fetchVolumes(token?: string | null): Promise<ListVolumesRe
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'volumes request failed');
+  await assertOk(response, 'volumes request failed');
 
   return (await response.json()) as ListVolumesResponse;
 }
@@ -220,7 +229,7 @@ export async function fetchVolume(
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'volume request failed');
+  await assertOk(response, 'volume request failed');
 
   return (await response.json()) as VolumeResponse;
 }
@@ -236,7 +245,7 @@ export async function updateVolume(
     body: JSON.stringify(request),
   });
 
-  assertOk(response, 'volume update request failed');
+  await assertOk(response, 'volume update request failed');
 
   return (await response.json()) as VolumeResponse;
 }
@@ -247,7 +256,7 @@ export async function deleteVolume(volumeId: string, token?: string | null): Pro
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'volume delete request failed');
+  await assertOk(response, 'volume delete request failed');
 }
 
 export async function fetchInstances(token?: string | null): Promise<ListInstancesResponse> {
@@ -255,7 +264,7 @@ export async function fetchInstances(token?: string | null): Promise<ListInstanc
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'instances request failed');
+  await assertOk(response, 'instances request failed');
 
   return (await response.json()) as ListInstancesResponse;
 }
@@ -268,7 +277,7 @@ export async function fetchInstanceInfo(
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'instance info request failed');
+  await assertOk(response, 'instance info request failed');
 
   return (await response.json()) as InstanceInfoResponse;
 }
@@ -284,7 +293,7 @@ export async function runGcJob(
     body: JSON.stringify(request),
   });
 
-  assertOk(response, 'start GC job request failed');
+  await assertOk(response, 'start GC job request failed');
 
   return (await response.json()) as AcceptedJobResponse;
 }
@@ -298,7 +307,7 @@ export async function fetchJobStatus(
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'job status request failed');
+  await assertOk(response, 'job status request failed');
 
   return (await response.json()) as JobStatusResponse;
 }
@@ -315,7 +324,7 @@ export async function fetchFileList(
     },
   );
 
-  assertOk(response, 'file list request failed');
+  await assertOk(response, 'file list request failed');
 
   return (await response.json()) as FileListResponse;
 }
@@ -332,7 +341,7 @@ export async function fetchFileStat(
     },
   );
 
-  assertOk(response, 'file stat request failed');
+  await assertOk(response, 'file stat request failed');
 
   return (await response.json()) as FileStatResponse;
 }
@@ -349,7 +358,7 @@ export async function fetchReadLink(
     },
   );
 
-  assertOk(response, 'readlink request failed');
+  await assertOk(response, 'readlink request failed');
 
   return (await response.json()) as ReadLinkResponse;
 }
@@ -362,7 +371,7 @@ export async function fetchTrash(
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'trash request failed');
+  await assertOk(response, 'trash request failed');
 
   return (await response.json()) as TrashResponse;
 }
@@ -380,7 +389,7 @@ export async function restoreTrashEntry(
     },
   );
 
-  assertOk(response, 'trash restore request failed');
+  await assertOk(response, 'trash restore request failed');
 }
 
 export async function deleteTrashEntry(
@@ -396,7 +405,7 @@ export async function deleteTrashEntry(
     },
   );
 
-  assertOk(response, 'trash delete request failed');
+  await assertOk(response, 'trash delete request failed');
 }
 
 export async function fetchAcl(
@@ -411,7 +420,7 @@ export async function fetchAcl(
     },
   );
 
-  assertOk(response, 'ACL request failed');
+  await assertOk(response, 'ACL request failed');
 
   return (await response.json()) as AclResponse;
 }
@@ -431,7 +440,7 @@ export async function putAcl(
     },
   );
 
-  assertOk(response, 'ACL update request failed');
+  await assertOk(response, 'ACL update request failed');
 
   return (await response.json()) as AclResponse;
 }
@@ -449,7 +458,7 @@ export async function deleteAcl(
     },
   );
 
-  assertOk(response, 'ACL delete request failed');
+  await assertOk(response, 'ACL delete request failed');
 }
 
 export async function fetchCsiSummary(token?: string | null): Promise<CsiSummaryResponse> {
@@ -457,7 +466,7 @@ export async function fetchCsiSummary(token?: string | null): Promise<CsiSummary
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'CSI summary request failed');
+  await assertOk(response, 'CSI summary request failed');
 
   return (await response.json()) as CsiSummaryResponse;
 }
@@ -507,7 +516,7 @@ export async function createVolume(
     body: JSON.stringify(request),
   });
 
-  assertOk(response, 'create volume request failed');
+  await assertOk(response, 'create volume request failed');
 
   return (await response.json()) as VolumeResponse;
 }
@@ -545,13 +554,44 @@ async function fetchCsiResourceList(
     headers: apiHeaders(token),
   });
 
-  assertOk(response, 'CSI resource request failed');
+  await assertOk(response, 'CSI resource request failed');
 
   return (await response.json()) as CsiResourceListResponse;
 }
 
-function assertOk(response: Response, message: string) {
+async function assertOk(response: Response, message: string) {
   if (!response.ok) {
-    throw new ApiError(`${message}: ${response.status}`, response.status);
+    const error = await readApiError(response);
+    const detail = error.detail ? `${response.status}: ${error.detail}` : String(response.status);
+    throw new ApiError(`${message}: ${detail}`, response.status, error.code, error.detail);
   }
+}
+
+async function readApiError(
+  response: Response,
+): Promise<{ code: string | null; detail: string | null }> {
+  if (!response.headers.get('content-type')?.includes('application/json')) {
+    return { code: null, detail: null };
+  }
+
+  try {
+    const payload: unknown = await response.json();
+    if (!isRecord(payload) || !isRecord(payload.error)) {
+      return { code: null, detail: null };
+    }
+    return {
+      code: stringOrNull(payload.error.code),
+      detail: stringOrNull(payload.error.message),
+    };
+  } catch {
+    return { code: null, detail: null };
+  }
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

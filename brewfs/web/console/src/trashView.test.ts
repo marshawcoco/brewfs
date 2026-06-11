@@ -98,4 +98,18 @@ describe('loadTrashView', () => {
     expect(result.title).toBe('Trash unavailable');
     expect(result.volumeName).toBe('dev-local');
   });
+
+  it('does not hide non-control-plane bad gateway trash errors', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'bad_gateway' } }), {
+        status: 502,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(loadTrashView(volume, 'secret-token')).rejects.toMatchObject({
+      status: 502,
+      code: 'bad_gateway',
+    });
+  });
 });

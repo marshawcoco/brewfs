@@ -65,7 +65,7 @@ function aclErrorOrThrow(
   path: string,
   err: unknown,
 ): AclViewResult {
-  if (err instanceof ApiError && (err.status === 409 || err.status === 502)) {
+  if (err instanceof ApiError && (err.status === 409 || err.code === 'control_plane_error')) {
     return {
       state: 'unavailable',
       title: 'ACL unavailable',
