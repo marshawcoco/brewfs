@@ -22,7 +22,7 @@ impl HealthResponse {
             service: "brewfs-console",
             version: env!("CARGO_PKG_VERSION"),
             commit_short: env!("BREWFS_GIT_COMMIT_SHORT"),
-            auth_mode: state.auth_mode,
+            auth_mode: state.auth.mode(),
             integrations: HealthIntegrations {
                 csi_dashboard: state.csi_dashboard,
             },
@@ -39,13 +39,13 @@ pub async fn health(State(state): State<ConsoleState>) -> Json<HealthResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::console::{AuthMode, ConsoleState};
+    use crate::console::{AuthConfig, AuthMode, ConsoleState};
     use std::path::PathBuf;
 
     #[test]
     fn health_response_uses_build_metadata_and_state() {
         let state = ConsoleState {
-            auth_mode: AuthMode::Disabled,
+            auth: AuthConfig::Disabled,
             static_dir: PathBuf::from("/tmp/brewfs-console-dist"),
             csi_dashboard: true,
         };

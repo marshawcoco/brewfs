@@ -1,31 +1,64 @@
 import {
   Activity,
   Database,
+  FileSearch,
   FolderTree,
   Gauge,
   HardDrive,
   Settings,
+  ShieldCheck,
+  Trash2,
   type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { fetchHealth, type HealthResponse } from './api';
 
-type PageKey = 'overview' | 'filesystems' | 'jobs' | 'csi' | 'settings';
+type PageKey =
+  | 'overview'
+  | 'filesystems'
+  | 'browser'
+  | 'trash'
+  | 'acl'
+  | 'jobs'
+  | 'csi'
+  | 'settings';
 
 const navItems: Array<{ key: PageKey; label: string; icon: LucideIcon }> = [
   { key: 'overview', label: 'Overview', icon: Gauge },
   { key: 'filesystems', label: 'Filesystems', icon: HardDrive },
+  { key: 'browser', label: 'Browser', icon: FileSearch },
+  { key: 'trash', label: 'Trash', icon: Trash2 },
+  { key: 'acl', label: 'ACL', icon: ShieldCheck },
   { key: 'jobs', label: 'Jobs', icon: Activity },
   { key: 'csi', label: 'CSI', icon: Database },
   { key: 'settings', label: 'Settings', icon: Settings },
 ];
 
+const pagePaths: Record<PageKey, string> = {
+  overview: '/',
+  filesystems: '/filesystems',
+  browser: '/browser',
+  trash: '/trash',
+  acl: '/acl',
+  jobs: '/jobs',
+  csi: '/csi',
+  settings: '/settings',
+};
+
 function pageTitle(page: PageKey): string {
   return navItems.find((item) => item.key === page)?.label ?? 'Overview';
 }
 
+function pageFromPathname(pathname: string): PageKey {
+  const normalized = pathname === '/' ? '/' : pathname.replace(/\/+$/, '');
+  return (
+    (Object.entries(pagePaths).find(([, path]) => path === normalized)?.[0] as PageKey | undefined) ??
+    'overview'
+  );
+}
+
 export function App() {
-  const [page, setPage] = useState<PageKey>('overview');
+  const [page, setPage] = useState<PageKey>(() => pageFromPathname(window.location.pathname));
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,6 +79,20 @@ export function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const handlePopState = () => setPage(pageFromPathname(window.location.pathname));
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigate = (nextPage: PageKey) => {
+    setPage(nextPage);
+    const nextPath = pagePaths[nextPage];
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState(null, '', nextPath);
+    }
+  };
 
   const status = useMemo(() => {
     if (error) return { label: 'API unavailable', tone: 'bad' };
@@ -71,7 +118,7 @@ export function App() {
                 key={item.key}
                 className={page === item.key ? 'nav-item active' : 'nav-item'}
                 type="button"
-                onClick={() => setPage(item.key)}
+                onClick={() => navigate(item.key)}
               >
                 <Icon size={18} aria-hidden="true" />
                 <span>{item.label}</span>
@@ -127,6 +174,33 @@ function renderPage(page: PageKey, health: HealthResponse | null, error: string 
       <EmptyPanel
         title="No jobs"
         detail="Runtime job discovery arrives with control-plane integration."
+      />
+    );
+  }
+
+  if (page === 'browser') {
+    return (
+      <EmptyPanel
+        title="File browser unavailable"
+        detail="Namespace browsing depends on mounted instance discovery and file metadata APIs."
+      />
+    );
+  }
+
+  if (page === 'trash') {
+    return (
+      <EmptyPanel
+        title="Trash unavailable"
+        detail="Trash listing and restore actions depend on delayed-delete metadata APIs."
+      />
+    );
+  }
+
+  if (page === 'acl') {
+    return (
+      <EmptyPanel
+        title="ACL unavailable"
+        detail="ACL editing will be enabled only for backends that advertise ACL support."
       />
     );
   }

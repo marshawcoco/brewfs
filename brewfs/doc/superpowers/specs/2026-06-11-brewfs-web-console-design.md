@@ -73,8 +73,9 @@ The first implementation should create a runnable skeleton, not the full console
 
 - Add `brewfs console --listen 127.0.0.1:18080 --dev-no-auth`.
 - Serve `GET /api/health`.
+- Enforce bearer-token auth for `/api/*` unless `--dev-no-auth` is set.
 - Serve the frontend static app.
-- Add frontend routes for Overview, Filesystems, Jobs, CSI, and Settings.
+- Add frontend routes for Overview, Filesystems, Browser, Trash, ACL, Jobs, CSI, and Settings.
 - Add a small frontend API client for `/api/health`.
 - Render empty states and unsupported states for features that are not wired yet.
 
@@ -416,8 +417,8 @@ curl http://127.0.0.1:18080/api/volumes
 
 For the first scaffold pass, split Phase 1 into two commits or tasks:
 
-- Phase 1A: `brewfs console`, `/api/health`, static asset serving, and the Vite React shell.
-- Phase 1B: token auth and volume registry with redaction.
+- Phase 1A: `brewfs console`, `/api/health`, API token auth, static asset serving, and the Vite React shell.
+- Phase 1B: volume registry with redaction.
 
 ### Phase 2: Runtime Integration
 
