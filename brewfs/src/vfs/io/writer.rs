@@ -1046,6 +1046,10 @@ struct Shared<B, M> {
 
 struct RecentPendingUploadState {
     bytes: AtomicU64,
+    soft_sleep_ops: AtomicU64,
+    soft_sleep_us: AtomicU64,
+    hard_wait_ops: AtomicU64,
+    hard_wait_us: AtomicU64,
     notify: Notify,
 }
 
@@ -1053,8 +1057,28 @@ impl RecentPendingUploadState {
     fn new() -> Self {
         Self {
             bytes: AtomicU64::new(0),
+            soft_sleep_ops: AtomicU64::new(0),
+            soft_sleep_us: AtomicU64::new(0),
+            hard_wait_ops: AtomicU64::new(0),
+            hard_wait_us: AtomicU64::new(0),
             notify: Notify::new(),
         }
+    }
+
+    fn record_soft_sleep(&self, duration: Duration) {
+        self.soft_sleep_ops.fetch_add(1, Ordering::Relaxed);
+        self.soft_sleep_us.fetch_add(
+            duration.as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn record_hard_wait(&self, duration: Duration) {
+        self.hard_wait_ops.fetch_add(1, Ordering::Relaxed);
+        self.hard_wait_us.fetch_add(
+            duration.as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -1284,14 +1308,23 @@ where
                 .recent_pending_upload
                 .bytes
                 .load(Ordering::Acquire);
-            match decide_writeback_backpressure(pending, incoming, soft, hard) {
+            let decision = decide_writeback_backpressure(pending, incoming, soft, hard);
+            match decision {
                 WritebackBackpressureDecision::Allow => return Ok(()),
                 WritebackBackpressureDecision::SoftSleep(duration) => {
+                    let start = Instant::now();
                     tokio::time::sleep(duration).await;
+                    self.shared
+                        .recent_pending_upload
+                        .record_soft_sleep(start.elapsed());
                     return Ok(());
                 }
                 WritebackBackpressureDecision::Wait => {
+                    let start = Instant::now();
                     self.shared.recent_pending_upload.notify.notified().await;
+                    self.shared
+                        .recent_pending_upload
+                        .record_hard_wait(start.elapsed());
                 }
             }
         }
@@ -2768,6 +2801,10 @@ pub(crate) struct WritebackDirtyBreakdown {
     pub live_bytes: u64,
     pub recently_committed_pending_upload_bytes: u64,
     pub recently_committed_uploaded_bytes: u64,
+    pub backpressure_soft_sleep_ops: u64,
+    pub backpressure_soft_sleep_us: u64,
+    pub backpressure_hard_wait_ops: u64,
+    pub backpressure_hard_wait_us: u64,
 }
 
 impl<B, M> DataWriter<B, M>
@@ -2829,7 +2866,25 @@ where
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        let mut breakdown = WritebackDirtyBreakdown::default();
+        let mut breakdown = WritebackDirtyBreakdown {
+            backpressure_soft_sleep_ops: self
+                .recent_pending_upload
+                .soft_sleep_ops
+                .load(Ordering::Relaxed),
+            backpressure_soft_sleep_us: self
+                .recent_pending_upload
+                .soft_sleep_us
+                .load(Ordering::Relaxed),
+            backpressure_hard_wait_ops: self
+                .recent_pending_upload
+                .hard_wait_ops
+                .load(Ordering::Relaxed),
+            backpressure_hard_wait_us: self
+                .recent_pending_upload
+                .hard_wait_us
+                .load(Ordering::Relaxed),
+            ..WritebackDirtyBreakdown::default()
+        };
 
         for writer in writers {
             let guard = writer.shared.inner.lock().await;
@@ -3795,6 +3850,13 @@ mod tests {
             .expect("write should wake after pending-upload backlog drains")
             .unwrap()
             .unwrap();
+
+        let breakdown = writer.dirty_breakdown().await;
+        assert_eq!(breakdown.backpressure_hard_wait_ops, 1);
+        assert!(
+            breakdown.backpressure_hard_wait_us > 0,
+            "hard wait duration should be recorded after blocked write wakes"
+        );
     }
 
     #[tokio::test]

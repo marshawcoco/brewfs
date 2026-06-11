@@ -777,6 +777,12 @@ where
                         dirty.recently_committed_pending_upload_bytes,
                         dirty.recently_committed_uploaded_bytes,
                     );
+                    fuse_stats.sync_writeback_backpressure_metrics(
+                        dirty.backpressure_soft_sleep_ops,
+                        dirty.backpressure_soft_sleep_us,
+                        dirty.backpressure_hard_wait_ops,
+                        dirty.backpressure_hard_wait_us,
+                    );
                     if let Some(object_metrics) = &object_metrics {
                         let object = object_metrics.snapshot();
                         fuse_stats.sync_object_store_metrics(

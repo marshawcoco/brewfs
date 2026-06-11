@@ -344,6 +344,8 @@ prepare_artifacts() {
     mkdir -p "$artifact_dir/results" "$artifact_dir/tools" "$artifact_dir/diagnostics"
     touch "$artifact_dir/perf.log" "$artifact_dir/perf-summary.tsv" "$artifact_dir/report.md" >/dev/null 2>&1 || true
     printf 'tool\tstatus\tseconds\tlog\n' >"$artifact_dir/perf-summary.tsv"
+    printf 'tool\tpost_fio_drain_s\tpending_bytes\tdirty_bytes\tbuffer_dirty_bytes\n' \
+        >"$artifact_dir/post-write-drain.tsv"
     if truthy_env "${PERF_FUSE_OPS_LOG:-0}" || truthy_env "${BREWFS_FUSE_OP_LOG:-0}"; then
         export BREWFS_FUSE_OP_LOG=1
         export BREWFS_FUSE_LOG_FILE="$artifact_dir/brewfs_fuse_ops.log"
@@ -538,6 +540,55 @@ wait_for_fio_prefill_drain() {
 
         if (( elapsed % 10 == 0 )); then
             info "  写回等待中: pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty put_bytes=$put_bytes uploaded=$uploaded elapsed=${elapsed}s"
+        fi
+        sleep "$interval"
+    done
+}
+
+wait_for_fio_post_write_drain() {
+    local tool="$1"
+    local timeout="${PERF_FIO_POST_WRITE_DRAIN_TIMEOUT_SECS:-600}"
+    local interval="${PERF_FIO_POST_WRITE_DRAIN_INTERVAL_SECS:-2}"
+    local threshold="${PERF_FIO_POST_WRITE_DRAIN_PENDING_BYTES:-0}"
+    local start now elapsed pending dirty buffer_dirty drain_bytes
+
+    truthy_env "${PERF_FIO_POST_WRITE_DRAIN:-false}" || return 0
+    case "$tool" in
+        fio-seqwrite*|fio-randwrite*|fio-randrw*|fio-bigwrite*) ;;
+        *) return 0 ;;
+    esac
+
+    info "等待 fio 写入后写回完成: $tool (threshold=${threshold} bytes, timeout=${timeout}s)"
+    start="$(date +%s)"
+
+    while true; do
+        pending="$(numeric_stat_or_zero brewfs_writeback_recent_pending_upload_bytes)"
+        dirty="$(numeric_stat_or_zero brewfs_writeback_dirty_bytes)"
+        buffer_dirty="$(numeric_stat_or_zero brewfs_buffer_dirty_bytes)"
+        drain_bytes="$(max_u64 "$pending" "$dirty")"
+        drain_bytes="$(max_u64 "$drain_bytes" "$buffer_dirty")"
+
+        now="$(date +%s)"
+        elapsed="$((now - start))"
+
+        if (( drain_bytes <= threshold )); then
+            ok "fio 写入后写回已完成: $tool (pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty elapsed=${elapsed}s)"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$tool" "$elapsed" "$pending" "$dirty" "$buffer_dirty" \
+                >>"$artifact_dir/post-write-drain.tsv"
+            stats_snapshot_after_tool "${tool}-post-write-drained"
+            return 0
+        fi
+
+        if (( elapsed >= timeout )); then
+            err "fio 写入后写回等待超时: $tool (pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty elapsed=${elapsed}s)"
+            printf '%s\ttimeout:%s\t%s\t%s\t%s\n' "$tool" "$elapsed" "$pending" "$dirty" "$buffer_dirty" \
+                >>"$artifact_dir/post-write-drain.tsv"
+            stats_snapshot_after_tool "${tool}-post-write-drain-timeout"
+            return 1
+        fi
+
+        if (( elapsed % 10 == 0 )); then
+            info "  写后写回等待中: pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty elapsed=${elapsed}s"
         fi
         sleep "$interval"
     done
@@ -1090,6 +1141,7 @@ run_fio_profile() {
     args+=(--write_lat_log="$lat_log_prefix" --log_avg_msec=1000)
     run_logged_tool "$tool" fio "${args[@]}"
     append_fio_log_summary "$json_path" "$artifact_dir/tools/${tool}.log" "$tool"
+    wait_for_fio_post_write_drain "$tool"
 }
 
 generate_perf_report() {
@@ -1129,6 +1181,29 @@ for row in rows:
         f"| {row.get('tool', '')} | {row.get('status', '')} | "
         f"{row.get('seconds', '')} | tools/{log} |"
     )
+
+post_write_drain_path = artifact_dir / "post-write-drain.tsv"
+if post_write_drain_path.exists():
+    with post_write_drain_path.open(newline="") as f:
+        drain_rows = [
+            row
+            for row in csv.DictReader(f, delimiter="\t")
+            if row.get("tool")
+        ]
+    if drain_rows:
+        lines.extend([
+            "",
+            "## Post-Write Drain",
+            "",
+            "| Tool | Drain seconds | Pending bytes | Dirty bytes | Buffer dirty bytes |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ])
+        for row in drain_rows:
+            lines.append(
+                f"| {row.get('tool', '')} | {row.get('post_fio_drain_s', '')} | "
+                f"{row.get('pending_bytes', '')} | {row.get('dirty_bytes', '')} | "
+                f"{row.get('buffer_dirty_bytes', '')} |"
+            )
 
 if fio_json_paths:
     try:

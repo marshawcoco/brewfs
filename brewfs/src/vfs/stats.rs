@@ -77,6 +77,10 @@ pub struct FsStatsSnapshot {
     pub writeback_live_dirty_bytes: u64,
     pub writeback_recent_pending_upload_bytes: u64,
     pub writeback_recent_uploaded_bytes: u64,
+    pub writeback_backpressure_soft_sleep_ops: u64,
+    pub writeback_backpressure_soft_sleep_us: u64,
+    pub writeback_backpressure_hard_wait_ops: u64,
+    pub writeback_backpressure_hard_wait_us: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub read_block_cache_hits: u64,
@@ -278,6 +282,14 @@ pub struct FsStats {
     pub writeback_recent_pending_upload_bytes: AtomicU64,
     /// Recently committed bytes already uploaded to S3 but kept for overlay grace.
     pub writeback_recent_uploaded_bytes: AtomicU64,
+    /// Soft backpressure sleeps on committed-but-not-uploaded writeback bytes.
+    pub writeback_backpressure_soft_sleep_ops: AtomicU64,
+    /// Total soft backpressure sleep duration in microseconds.
+    pub writeback_backpressure_soft_sleep_us: AtomicU64,
+    /// Hard backpressure waits on committed-but-not-uploaded writeback bytes.
+    pub writeback_backpressure_hard_wait_ops: AtomicU64,
+    /// Total hard backpressure wait duration in microseconds.
+    pub writeback_backpressure_hard_wait_us: AtomicU64,
     /// Block cache hit count
     pub cache_hits: AtomicU64,
     /// Block cache miss count
@@ -388,6 +400,10 @@ impl FsStats {
             writeback_live_dirty_bytes: AtomicU64::new(0),
             writeback_recent_pending_upload_bytes: AtomicU64::new(0),
             writeback_recent_uploaded_bytes: AtomicU64::new(0),
+            writeback_backpressure_soft_sleep_ops: AtomicU64::new(0),
+            writeback_backpressure_soft_sleep_us: AtomicU64::new(0),
+            writeback_backpressure_hard_wait_ops: AtomicU64::new(0),
+            writeback_backpressure_hard_wait_us: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
             read_block_cache_hits: AtomicU64::new(0),
@@ -477,6 +493,16 @@ impl FsStats {
                 .writeback_recent_pending_upload_bytes
                 .load(ORD),
             writeback_recent_uploaded_bytes: self.writeback_recent_uploaded_bytes.load(ORD),
+            writeback_backpressure_soft_sleep_ops: self
+                .writeback_backpressure_soft_sleep_ops
+                .load(ORD),
+            writeback_backpressure_soft_sleep_us: self
+                .writeback_backpressure_soft_sleep_us
+                .load(ORD),
+            writeback_backpressure_hard_wait_ops: self
+                .writeback_backpressure_hard_wait_ops
+                .load(ORD),
+            writeback_backpressure_hard_wait_us: self.writeback_backpressure_hard_wait_us.load(ORD),
             cache_hits: self.cache_hits.load(ORD),
             cache_misses: self.cache_misses.load(ORD),
             read_block_cache_hits: self.read_block_cache_hits.load(ORD),
@@ -524,6 +550,35 @@ impl FsStats {
             .store(recent_pending_upload_bytes, ORD);
         self.writeback_recent_uploaded_bytes
             .store(recent_uploaded_bytes, ORD);
+    }
+
+    pub fn add_writeback_backpressure_soft_sleep(&self, duration: Duration) {
+        self.writeback_backpressure_soft_sleep_ops.fetch_add(1, ORD);
+        self.writeback_backpressure_soft_sleep_us
+            .fetch_add(duration.as_micros().min(u128::from(u64::MAX)) as u64, ORD);
+    }
+
+    pub fn add_writeback_backpressure_hard_wait(&self, duration: Duration) {
+        self.writeback_backpressure_hard_wait_ops.fetch_add(1, ORD);
+        self.writeback_backpressure_hard_wait_us
+            .fetch_add(duration.as_micros().min(u128::from(u64::MAX)) as u64, ORD);
+    }
+
+    pub fn sync_writeback_backpressure_metrics(
+        &self,
+        soft_sleep_ops: u64,
+        soft_sleep_us: u64,
+        hard_wait_ops: u64,
+        hard_wait_us: u64,
+    ) {
+        self.writeback_backpressure_soft_sleep_ops
+            .store(soft_sleep_ops, ORD);
+        self.writeback_backpressure_soft_sleep_us
+            .store(soft_sleep_us, ORD);
+        self.writeback_backpressure_hard_wait_ops
+            .store(hard_wait_ops, ORD);
+        self.writeback_backpressure_hard_wait_us
+            .store(hard_wait_us, ORD);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -900,6 +955,22 @@ impl FsStats {
             snapshot.writeback_recent_uploaded_bytes
         ));
         out.push_str(&format!(
+            "brewfs_writeback_backpressure_soft_sleep_ops {}\n",
+            snapshot.writeback_backpressure_soft_sleep_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_backpressure_soft_sleep_us {}\n",
+            snapshot.writeback_backpressure_soft_sleep_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_backpressure_hard_wait_ops {}\n",
+            snapshot.writeback_backpressure_hard_wait_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_backpressure_hard_wait_us {}\n",
+            snapshot.writeback_backpressure_hard_wait_us
+        ));
+        out.push_str(&format!(
             "brewfs_reader_buffer_bytes {}\n",
             snapshot.buf_read_bytes
         ));
@@ -1112,6 +1183,8 @@ mod tests {
         stats.sync_cache_counters(8, 2);
         stats.sync_buffer_bytes(4096, 8192);
         stats.sync_writeback_dirty_breakdown(1024, 2048, 512);
+        stats.add_writeback_backpressure_soft_sleep(Duration::from_micros(12));
+        stats.add_writeback_backpressure_hard_wait(Duration::from_micros(34));
 
         let output = stats.render();
         assert!(output.contains("brewfs_fuse_read_ops_total 42"));
@@ -1151,6 +1224,10 @@ mod tests {
         assert!(output.contains("brewfs_writeback_live_dirty_bytes 1024"));
         assert!(output.contains("brewfs_writeback_recent_pending_upload_bytes 2048"));
         assert!(output.contains("brewfs_writeback_recent_uploaded_bytes 512"));
+        assert!(output.contains("brewfs_writeback_backpressure_soft_sleep_ops 1"));
+        assert!(output.contains("brewfs_writeback_backpressure_soft_sleep_us 12"));
+        assert!(output.contains("brewfs_writeback_backpressure_hard_wait_ops 1"));
+        assert!(output.contains("brewfs_writeback_backpressure_hard_wait_us 34"));
         assert!(output.contains("brewfs_reader_buffer_bytes 8192"));
         assert!(output.contains("brewfs_vfs_create_total_ops_total 0"));
         assert!(output.contains("brewfs_vfs_unlink_lookup_lat_us_total 0"));
@@ -1173,6 +1250,9 @@ mod tests {
         stats.fuse_write_lat_us.store(1000, ORD);
         stats.sync_cache_counters(3, 1);
         stats.sync_writeback_dirty_breakdown(11, 22, 33);
+        stats.add_writeback_backpressure_soft_sleep(Duration::from_micros(44));
+        stats.add_writeback_backpressure_hard_wait(Duration::from_micros(55));
+        stats.sync_writeback_backpressure_metrics(66, 77, 88, 99);
         stats.sync_object_store_metrics(2, 8192, 50, 1, 4096, 25, 75, 125, 3);
 
         let snapshot = stats.snapshot();
@@ -1191,6 +1271,10 @@ mod tests {
         assert_eq!(snapshot.writeback_live_dirty_bytes, 11);
         assert_eq!(snapshot.writeback_recent_pending_upload_bytes, 22);
         assert_eq!(snapshot.writeback_recent_uploaded_bytes, 33);
+        assert_eq!(snapshot.writeback_backpressure_soft_sleep_ops, 66);
+        assert_eq!(snapshot.writeback_backpressure_soft_sleep_us, 77);
+        assert_eq!(snapshot.writeback_backpressure_hard_wait_ops, 88);
+        assert_eq!(snapshot.writeback_backpressure_hard_wait_us, 99);
     }
 
     #[test]
