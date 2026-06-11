@@ -13,7 +13,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use axum::{
     http::StatusCode,
@@ -81,6 +81,11 @@ pub struct JobStatusResponse {
     pub state: JobState,
     pub detail: Option<String>,
     pub outcome: Option<JobOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PathQuery {
+    pub path: Option<String>,
 }
 
 impl From<InstanceRecord> for InstanceResponse {
@@ -282,6 +287,80 @@ pub async fn get_job_status(
     }
 }
 
+pub async fn list_files(
+    Path(_volume_id): Path<String>,
+    Query(query): Query<PathQuery>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    Err(unsupported(
+        "file browser APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn list_trash(
+    Path(_volume_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    Err(unsupported(
+        "trash APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn restore_trash_entry(
+    Path((_volume_id, _entry_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    Err(unsupported(
+        "trash APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn delete_trash_entry(
+    Path((_volume_id, _entry_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    Err(unsupported(
+        "trash APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn get_acl(
+    Path(_volume_id): Path<String>,
+    Query(query): Query<PathQuery>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    Err(unsupported(
+        "ACL APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn put_acl(
+    Path(_volume_id): Path<String>,
+    Query(query): Query<PathQuery>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    Err(unsupported(
+        "ACL APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn delete_acl(
+    Path(_volume_id): Path<String>,
+    Query(query): Query<PathQuery>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let _path = query.path.unwrap_or_else(|| "/".to_string());
+    Err(unsupported(
+        "ACL APIs are not implemented for BrewFS volumes yet",
+    ))
+}
+
+pub async fn csi_summary(
+    State(state): State<ConsoleState>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    if state.csi_dashboard {
+        Err(unsupported("CSI dashboard adapter is not implemented yet"))
+    } else {
+        Err(unsupported("CSI dashboard is disabled"))
+    }
+}
+
 async fn send_instance_control_request(
     state: &ConsoleState,
     pid: u32,
@@ -337,6 +416,10 @@ async fn send_control_request(
                 format!("control-plane request failed: {err}"),
             )
         })
+}
+
+fn unsupported(message: impl Into<String>) -> ApiErrorResponse {
+    json_error(StatusCode::NOT_IMPLEMENTED, "unsupported", message)
 }
 
 pub fn json_error(

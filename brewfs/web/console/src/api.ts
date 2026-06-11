@@ -81,6 +81,49 @@ export interface JobStatusResponse {
   outcome: JobOutcome | null;
 }
 
+export interface FileEntryResponse {
+  name: string;
+  inode: number;
+  kind: string;
+  size: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  mtime: string;
+}
+
+export interface FileListResponse {
+  path: string;
+  entries: FileEntryResponse[];
+}
+
+export interface TrashResponse {
+  entries: unknown[];
+}
+
+export interface AclEntry {
+  scope: string;
+  tag: string;
+  id?: number;
+  perm: string;
+}
+
+export interface AclResponse {
+  entries: AclEntry[];
+}
+
+export interface AclUpdateRequest {
+  entries: AclEntry[];
+}
+
+export interface CsiSummaryResponse {
+  storageclasses: number;
+  persistentvolumes: number;
+  persistentvolumeclaims: number;
+  pods: number;
+  unhealthy_mounts: number;
+}
+
 export interface ListInstancesResponse {
   instances: InstanceResponse[];
 }
@@ -183,6 +226,131 @@ export async function fetchJobStatus(
   return (await response.json()) as JobStatusResponse;
 }
 
+export async function fetchFileList(
+  volumeId: string,
+  path: string,
+  token?: string | null,
+): Promise<FileListResponse> {
+  const response = await fetch(
+    `/api/volumes/${encodeURIComponent(volumeId)}/files?${pathSearch(path)}`,
+    {
+      headers: apiHeaders(token),
+    },
+  );
+
+  assertOk(response, 'file list request failed');
+
+  return (await response.json()) as FileListResponse;
+}
+
+export async function fetchTrash(
+  volumeId: string,
+  token?: string | null,
+): Promise<TrashResponse> {
+  const response = await fetch(`/api/volumes/${encodeURIComponent(volumeId)}/trash`, {
+    headers: apiHeaders(token),
+  });
+
+  assertOk(response, 'trash request failed');
+
+  return (await response.json()) as TrashResponse;
+}
+
+export async function restoreTrashEntry(
+  volumeId: string,
+  entryId: string,
+  token?: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `/api/volumes/${encodeURIComponent(volumeId)}/trash/${encodeURIComponent(entryId)}/restore`,
+    {
+      method: 'POST',
+      headers: apiHeaders(token),
+    },
+  );
+
+  assertOk(response, 'trash restore request failed');
+}
+
+export async function deleteTrashEntry(
+  volumeId: string,
+  entryId: string,
+  token?: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `/api/volumes/${encodeURIComponent(volumeId)}/trash/${encodeURIComponent(entryId)}`,
+    {
+      method: 'DELETE',
+      headers: apiHeaders(token),
+    },
+  );
+
+  assertOk(response, 'trash delete request failed');
+}
+
+export async function fetchAcl(
+  volumeId: string,
+  path: string,
+  token?: string | null,
+): Promise<AclResponse> {
+  const response = await fetch(
+    `/api/volumes/${encodeURIComponent(volumeId)}/acl?${pathSearch(path)}`,
+    {
+      headers: apiHeaders(token),
+    },
+  );
+
+  assertOk(response, 'ACL request failed');
+
+  return (await response.json()) as AclResponse;
+}
+
+export async function putAcl(
+  volumeId: string,
+  path: string,
+  request: AclUpdateRequest,
+  token?: string | null,
+): Promise<AclResponse> {
+  const response = await fetch(
+    `/api/volumes/${encodeURIComponent(volumeId)}/acl?${pathSearch(path)}`,
+    {
+      method: 'PUT',
+      headers: apiHeaders(token, true),
+      body: JSON.stringify(request),
+    },
+  );
+
+  assertOk(response, 'ACL update request failed');
+
+  return (await response.json()) as AclResponse;
+}
+
+export async function deleteAcl(
+  volumeId: string,
+  path: string,
+  token?: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `/api/volumes/${encodeURIComponent(volumeId)}/acl?${pathSearch(path)}`,
+    {
+      method: 'DELETE',
+      headers: apiHeaders(token),
+    },
+  );
+
+  assertOk(response, 'ACL delete request failed');
+}
+
+export async function fetchCsiSummary(token?: string | null): Promise<CsiSummaryResponse> {
+  const response = await fetch('/api/csi/summary', {
+    headers: apiHeaders(token),
+  });
+
+  assertOk(response, 'CSI summary request failed');
+
+  return (await response.json()) as CsiSummaryResponse;
+}
+
 export async function createVolume(
   request: CreateVolumeRequest,
   token?: string | null,
@@ -208,6 +376,10 @@ function apiHeaders(token?: string | null, json = false): Record<string, string>
     headers['Content-Type'] = 'application/json';
   }
   return headers;
+}
+
+function pathSearch(path: string): string {
+  return new URLSearchParams({ path }).toString();
 }
 
 function assertOk(response: Response, message: string) {

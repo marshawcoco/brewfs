@@ -2,11 +2,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
   createVolume,
+  deleteAcl,
+  deleteTrashEntry,
+  fetchAcl,
+  fetchCsiSummary,
+  fetchFileList,
   fetchHealth,
   fetchInstanceInfo,
   fetchInstances,
   fetchJobStatus,
+  fetchTrash,
   fetchVolumes,
+  putAcl,
+  restoreTrashEntry,
   runGcJob,
 } from './api';
 
@@ -296,5 +304,136 @@ describe('runtime instances API', () => {
     });
     expect(result.state).toBe('Succeeded');
     expect(result.outcome?.Gc?.orphan_slice_count).toBe(3);
+  });
+});
+
+describe('unsupported feature API contracts', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('throws ApiError for unsupported file browser responses', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'unsupported' } }), {
+        status: 501,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(fetchFileList('vol-1', '/', 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+    expect(fetch).toHaveBeenCalledWith('/api/volumes/vol-1/files?path=%2F', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+  });
+
+  it('throws ApiError for unsupported trash responses', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'unsupported' } }), {
+        status: 501,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(fetchTrash('vol-1', 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+    expect(fetch).toHaveBeenCalledWith('/api/volumes/vol-1/trash', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+
+    await expect(restoreTrashEntry('vol-1', 'trash-1', 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+    expect(fetch).toHaveBeenLastCalledWith('/api/volumes/vol-1/trash/trash-1/restore', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+
+    await expect(deleteTrashEntry('vol-1', 'trash-1', 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+    expect(fetch).toHaveBeenLastCalledWith('/api/volumes/vol-1/trash/trash-1', {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+  });
+
+  it('sends ACL reads and writes through stable endpoints', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'unsupported' } }), {
+        status: 501,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(fetchAcl('vol-1', '/', 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+
+    expect(fetch).toHaveBeenCalledWith('/api/volumes/vol-1/acl?path=%2F', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+
+    await expect(putAcl('vol-1', '/', { entries: [] }, 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+
+    expect(fetch).toHaveBeenLastCalledWith('/api/volumes/vol-1/acl?path=%2F', {
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ entries: [] }),
+    });
+
+    await expect(deleteAcl('vol-1', '/', 'secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+
+    expect(fetch).toHaveBeenLastCalledWith('/api/volumes/vol-1/acl?path=%2F', {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+  });
+
+  it('throws ApiError for unsupported CSI summary responses', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'unsupported' } }), {
+        status: 501,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(fetchCsiSummary('secret-token')).rejects.toMatchObject({
+      status: 501,
+    } satisfies Partial<ApiError>);
+    expect(fetch).toHaveBeenCalledWith('/api/csi/summary', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
   });
 });

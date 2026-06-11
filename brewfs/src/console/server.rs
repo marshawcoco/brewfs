@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use std::path::{Path, PathBuf};
 use tower_http::services::ServeDir;
@@ -21,10 +21,25 @@ pub fn build_router(config: ConsoleConfig) -> Router {
     let api = Router::new()
         .route("/health", get(api::health))
         .route("/volumes", get(api::list_volumes).post(api::create_volume))
+        .route("/volumes/{volume_id}/files", get(api::list_files))
+        .route("/volumes/{volume_id}/trash", get(api::list_trash))
+        .route(
+            "/volumes/{volume_id}/trash/{entry_id}/restore",
+            post(api::restore_trash_entry),
+        )
+        .route(
+            "/volumes/{volume_id}/trash/{entry_id}",
+            delete(api::delete_trash_entry),
+        )
+        .route(
+            "/volumes/{volume_id}/acl",
+            get(api::get_acl).put(api::put_acl).delete(api::delete_acl),
+        )
         .route("/instances", get(api::list_instances))
         .route("/instances/{pid}", get(api::get_instance_info))
         .route("/instances/{pid}/jobs/gc", post(api::start_gc_job))
         .route("/instances/{pid}/jobs/{job_id}", get(api::get_job_status))
+        .route("/csi/summary", get(api::csi_summary))
         .fallback(api_not_found)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -649,6 +664,64 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "control_plane_error");
+    }
+
+    #[tokio::test]
+    async fn unsupported_feature_routes_return_stable_json_errors() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
+
+        let requests = [
+            Request::builder()
+                .uri("/api/volumes/vol-1/files?path=/")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/volumes/vol-1/trash")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/volumes/vol-1/trash/trash-1/restore")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/volumes/vol-1/trash/trash-1")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/volumes/vol-1/acl?path=/")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("PUT")
+                .uri("/api/volumes/vol-1/acl?path=/")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/volumes/vol-1/acl?path=/")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/csi/summary")
+                .body(Body::empty())
+                .unwrap(),
+        ];
+
+        for request in requests {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/json"
+            );
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["code"], "unsupported");
+        }
     }
 
     struct GetInfoHandler;
