@@ -16,7 +16,6 @@ import {
   ApiError,
   createVolume,
   fetchHealth,
-  fetchInstanceInfo,
   fetchInstances,
   fetchVolumes,
   type HealthResponse,
@@ -24,6 +23,7 @@ import {
   type InstanceResponse,
   type VolumeResponse,
 } from './api';
+import { loadInstanceDetails } from './instanceDetails';
 
 type PageKey =
   | 'overview'
@@ -120,16 +120,17 @@ export function App() {
           const instanceResult = await fetchInstances(token);
           if (!cancelled) {
             setInstances(instanceResult.instances);
-            setInstanceError(null);
+            setInstanceDetails({});
           }
-          const detailEntries = await Promise.all(
-            instanceResult.instances.map(async (instance) => [
-              instance.pid,
-              await fetchInstanceInfo(instance.pid, token),
-            ] as const),
-          );
+          const detailState = await loadInstanceDetails(instanceResult.instances, token);
           if (!cancelled) {
-            setInstanceDetails(Object.fromEntries(detailEntries));
+            setInstanceDetails(detailState.details);
+            if (detailState.authRequired) {
+              setHealth(null);
+              setAuthRequired(true);
+            } else {
+              setInstanceError(detailState.error);
+            }
           }
         } catch (err: unknown) {
           if (cancelled) return;

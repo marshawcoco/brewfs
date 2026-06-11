@@ -140,7 +140,7 @@ pub async fn list_instances(
 
 pub async fn get_instance_info(
     State(state): State<ConsoleState>,
-    Path(pid): Path<u32>,
+    Path(requested_pid): Path<u32>,
 ) -> Result<Json<InstanceInfoResponse>, ApiErrorResponse> {
     let record = state
         .runtime_registry
@@ -154,7 +154,7 @@ pub async fn get_instance_info(
             )
         })?
         .into_iter()
-        .find(|record| record.pid == pid)
+        .find(|record| record.pid == requested_pid)
         .ok_or_else(|| {
             json_error(
                 StatusCode::NOT_FOUND,
@@ -191,14 +191,23 @@ pub async fn get_instance_info(
             version,
             meta_backend,
             capabilities,
-        } => Ok(Json(InstanceInfoResponse {
-            pid,
-            mount_point,
-            started_at,
-            version,
-            meta_backend,
-            capabilities,
-        })),
+        } => {
+            if pid != requested_pid {
+                return Err(json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "control_plane_error",
+                    format!("control-plane pid mismatch: requested {requested_pid}, got {pid}"),
+                ));
+            }
+            Ok(Json(InstanceInfoResponse {
+                pid,
+                mount_point,
+                started_at,
+                version,
+                meta_backend,
+                capabilities,
+            }))
+        }
         ControlResponse::Error { code, message } => Err(json_error(
             StatusCode::BAD_GATEWAY,
             "control_plane_error",

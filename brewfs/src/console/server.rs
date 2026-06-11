@@ -495,6 +495,45 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn instance_detail_rejects_control_plane_pid_mismatch() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(dir.path(), AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let _server = crate::control::server::ControlServer::bind(
+            socket_path.clone(),
+            MismatchedInfoHandler { pid: pid + 1 },
+        )
+        .await
+        .unwrap();
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        let app = build_router(config);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/instances/{pid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "control_plane_error");
+    }
+
     struct GetInfoHandler;
 
     #[async_trait::async_trait]
@@ -517,6 +556,35 @@ mod tests {
                         version: "0.1.0-test".to_string(),
                         meta_backend: "sqlx".to_string(),
                         capabilities,
+                    }
+                }
+                other => crate::control::protocol::ControlResponse::Error {
+                    code: "unexpected".to_string(),
+                    message: format!("unexpected request: {other:?}"),
+                },
+            }
+        }
+    }
+
+    struct MismatchedInfoHandler {
+        pid: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::control::server::ControlHandler for MismatchedInfoHandler {
+        async fn handle(
+            &self,
+            request: crate::control::protocol::ControlRequest,
+        ) -> crate::control::protocol::ControlResponse {
+            match request {
+                crate::control::protocol::ControlRequest::GetInfo => {
+                    crate::control::protocol::ControlResponse::Info {
+                        pid: self.pid,
+                        mount_point: "/mnt/brewfs-other".to_string(),
+                        started_at: 1_786_000_000_000,
+                        version: "0.1.0-test".to_string(),
+                        meta_backend: "sqlx".to_string(),
+                        capabilities: Default::default(),
                     }
                 }
                 other => crate::control::protocol::ControlResponse::Error {
