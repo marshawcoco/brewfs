@@ -81,6 +81,13 @@ pub struct FsStatsSnapshot {
     pub writeback_backpressure_soft_sleep_us: u64,
     pub writeback_backpressure_hard_wait_ops: u64,
     pub writeback_backpressure_hard_wait_us: u64,
+    pub writeback_stage_inflight_bytes: u64,
+    pub writeback_remote_upload_inflight_bytes: u64,
+    pub writeback_stage_ops: u64,
+    pub writeback_stage_bytes: u64,
+    pub writeback_stage_lat_us: u64,
+    pub writeback_stage_failures: u64,
+    pub writeback_commit_before_stage_ops: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub read_block_cache_hits: u64,
@@ -290,6 +297,20 @@ pub struct FsStats {
     pub writeback_backpressure_hard_wait_ops: AtomicU64,
     /// Total hard backpressure wait duration in microseconds.
     pub writeback_backpressure_hard_wait_us: AtomicU64,
+    /// Bytes currently being persisted to the local writeback stage.
+    pub writeback_stage_inflight_bytes: AtomicU64,
+    /// Bytes currently being uploaded from the writer pipeline to object storage.
+    pub writeback_remote_upload_inflight_bytes: AtomicU64,
+    /// Total local writeback stage operations.
+    pub writeback_stage_ops: AtomicU64,
+    /// Total bytes persisted to the local writeback stage.
+    pub writeback_stage_bytes: AtomicU64,
+    /// Total local writeback stage latency in microseconds.
+    pub writeback_stage_lat_us: AtomicU64,
+    /// Total local writeback stage failures.
+    pub writeback_stage_failures: AtomicU64,
+    /// Metadata commits that happened before local staging finished.
+    pub writeback_commit_before_stage_ops: AtomicU64,
     /// Block cache hit count
     pub cache_hits: AtomicU64,
     /// Block cache miss count
@@ -404,6 +425,13 @@ impl FsStats {
             writeback_backpressure_soft_sleep_us: AtomicU64::new(0),
             writeback_backpressure_hard_wait_ops: AtomicU64::new(0),
             writeback_backpressure_hard_wait_us: AtomicU64::new(0),
+            writeback_stage_inflight_bytes: AtomicU64::new(0),
+            writeback_remote_upload_inflight_bytes: AtomicU64::new(0),
+            writeback_stage_ops: AtomicU64::new(0),
+            writeback_stage_bytes: AtomicU64::new(0),
+            writeback_stage_lat_us: AtomicU64::new(0),
+            writeback_stage_failures: AtomicU64::new(0),
+            writeback_commit_before_stage_ops: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
             read_block_cache_hits: AtomicU64::new(0),
@@ -503,6 +531,15 @@ impl FsStats {
                 .writeback_backpressure_hard_wait_ops
                 .load(ORD),
             writeback_backpressure_hard_wait_us: self.writeback_backpressure_hard_wait_us.load(ORD),
+            writeback_stage_inflight_bytes: self.writeback_stage_inflight_bytes.load(ORD),
+            writeback_remote_upload_inflight_bytes: self
+                .writeback_remote_upload_inflight_bytes
+                .load(ORD),
+            writeback_stage_ops: self.writeback_stage_ops.load(ORD),
+            writeback_stage_bytes: self.writeback_stage_bytes.load(ORD),
+            writeback_stage_lat_us: self.writeback_stage_lat_us.load(ORD),
+            writeback_stage_failures: self.writeback_stage_failures.load(ORD),
+            writeback_commit_before_stage_ops: self.writeback_commit_before_stage_ops.load(ORD),
             cache_hits: self.cache_hits.load(ORD),
             cache_misses: self.cache_misses.load(ORD),
             read_block_cache_hits: self.read_block_cache_hits.load(ORD),
@@ -579,6 +616,29 @@ impl FsStats {
             .store(hard_wait_ops, ORD);
         self.writeback_backpressure_hard_wait_us
             .store(hard_wait_us, ORD);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_writeback_phase_metrics(
+        &self,
+        stage_inflight_bytes: u64,
+        remote_upload_inflight_bytes: u64,
+        stage_ops: u64,
+        stage_bytes: u64,
+        stage_lat_us: u64,
+        stage_failures: u64,
+        commit_before_stage_ops: u64,
+    ) {
+        self.writeback_stage_inflight_bytes
+            .store(stage_inflight_bytes, ORD);
+        self.writeback_remote_upload_inflight_bytes
+            .store(remote_upload_inflight_bytes, ORD);
+        self.writeback_stage_ops.store(stage_ops, ORD);
+        self.writeback_stage_bytes.store(stage_bytes, ORD);
+        self.writeback_stage_lat_us.store(stage_lat_us, ORD);
+        self.writeback_stage_failures.store(stage_failures, ORD);
+        self.writeback_commit_before_stage_ops
+            .store(commit_before_stage_ops, ORD);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -971,6 +1031,34 @@ impl FsStats {
             snapshot.writeback_backpressure_hard_wait_us
         ));
         out.push_str(&format!(
+            "brewfs_writeback_stage_inflight_bytes {}\n",
+            snapshot.writeback_stage_inflight_bytes
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_remote_upload_inflight_bytes {}\n",
+            snapshot.writeback_remote_upload_inflight_bytes
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_stage_ops_total {}\n",
+            snapshot.writeback_stage_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_stage_bytes_total {}\n",
+            snapshot.writeback_stage_bytes
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_stage_lat_us_total {}\n",
+            snapshot.writeback_stage_lat_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_stage_failures_total {}\n",
+            snapshot.writeback_stage_failures
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_before_stage_ops_total {}\n",
+            snapshot.writeback_commit_before_stage_ops
+        ));
+        out.push_str(&format!(
             "brewfs_reader_buffer_bytes {}\n",
             snapshot.buf_read_bytes
         ));
@@ -1185,6 +1273,7 @@ mod tests {
         stats.sync_writeback_dirty_breakdown(1024, 2048, 512);
         stats.add_writeback_backpressure_soft_sleep(Duration::from_micros(12));
         stats.add_writeback_backpressure_hard_wait(Duration::from_micros(34));
+        stats.sync_writeback_phase_metrics(1, 2, 3, 4, 5, 6, 7);
 
         let output = stats.render();
         assert!(output.contains("brewfs_fuse_read_ops_total 42"));
@@ -1228,6 +1317,13 @@ mod tests {
         assert!(output.contains("brewfs_writeback_backpressure_soft_sleep_us 12"));
         assert!(output.contains("brewfs_writeback_backpressure_hard_wait_ops 1"));
         assert!(output.contains("brewfs_writeback_backpressure_hard_wait_us 34"));
+        assert!(output.contains("brewfs_writeback_stage_inflight_bytes 1"));
+        assert!(output.contains("brewfs_writeback_remote_upload_inflight_bytes 2"));
+        assert!(output.contains("brewfs_writeback_stage_ops_total 3"));
+        assert!(output.contains("brewfs_writeback_stage_bytes_total 4"));
+        assert!(output.contains("brewfs_writeback_stage_lat_us_total 5"));
+        assert!(output.contains("brewfs_writeback_stage_failures_total 6"));
+        assert!(output.contains("brewfs_writeback_commit_before_stage_ops_total 7"));
         assert!(output.contains("brewfs_reader_buffer_bytes 8192"));
         assert!(output.contains("brewfs_vfs_create_total_ops_total 0"));
         assert!(output.contains("brewfs_vfs_unlink_lookup_lat_us_total 0"));
@@ -1253,6 +1349,7 @@ mod tests {
         stats.add_writeback_backpressure_soft_sleep(Duration::from_micros(44));
         stats.add_writeback_backpressure_hard_wait(Duration::from_micros(55));
         stats.sync_writeback_backpressure_metrics(66, 77, 88, 99);
+        stats.sync_writeback_phase_metrics(111, 222, 333, 444, 555, 666, 777);
         stats.sync_object_store_metrics(2, 8192, 50, 1, 4096, 25, 75, 125, 3);
 
         let snapshot = stats.snapshot();
@@ -1275,6 +1372,13 @@ mod tests {
         assert_eq!(snapshot.writeback_backpressure_soft_sleep_us, 77);
         assert_eq!(snapshot.writeback_backpressure_hard_wait_ops, 88);
         assert_eq!(snapshot.writeback_backpressure_hard_wait_us, 99);
+        assert_eq!(snapshot.writeback_stage_inflight_bytes, 111);
+        assert_eq!(snapshot.writeback_remote_upload_inflight_bytes, 222);
+        assert_eq!(snapshot.writeback_stage_ops, 333);
+        assert_eq!(snapshot.writeback_stage_bytes, 444);
+        assert_eq!(snapshot.writeback_stage_lat_us, 555);
+        assert_eq!(snapshot.writeback_stage_failures, 666);
+        assert_eq!(snapshot.writeback_commit_before_stage_ops, 777);
     }
 
     #[test]

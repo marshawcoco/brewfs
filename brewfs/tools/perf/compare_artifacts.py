@@ -265,6 +265,13 @@ STAT_METRICS = {
     "brewfs_writeback_backpressure_soft_sleep_us": ("writeback_soft_sleep_ms", "ms", 1000.0),
     "brewfs_writeback_backpressure_hard_wait_ops": ("writeback_hard_wait_ops", "ops", 1.0),
     "brewfs_writeback_backpressure_hard_wait_us": ("writeback_hard_wait_ms", "ms", 1000.0),
+    "brewfs_writeback_stage_inflight_bytes": ("writeback_stage_inflight_mib", "MiB", BYTES_PER_MIB),
+    "brewfs_writeback_remote_upload_inflight_bytes": ("writeback_remote_upload_inflight_mib", "MiB", BYTES_PER_MIB),
+    "brewfs_writeback_stage_ops_total": ("writeback_stage_ops", "ops", 1.0),
+    "brewfs_writeback_stage_bytes_total": ("writeback_stage_mib", "MiB", BYTES_PER_MIB),
+    "brewfs_writeback_stage_lat_us_total": ("writeback_stage_total_ms", "ms", 1000.0),
+    "brewfs_writeback_stage_failures_total": ("writeback_stage_failures", "ops", 1.0),
+    "brewfs_writeback_commit_before_stage_ops_total": ("writeback_commit_before_stage_ops", "ops", 1.0),
 }
 
 CRITICAL_STAT_METRICS = (

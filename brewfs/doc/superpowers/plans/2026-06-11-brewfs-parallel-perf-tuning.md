@@ -491,11 +491,62 @@ Decision: rejected; code reverted. The perf script produced the artifact and all
 
 Reason: the barrier improved object size and reduced `direct0` PUT amplification, which confirms that staging/aggregation is the right area. However, the implementation is not acceptable: it doubled `randrw-direct0` drain, regressed `randrw-direct0` write p99/p99.9 beyond the tail gate, and caused `randrw-direct1` wall time, write p99, and drain to regress far beyond the direct-mode gate. A safe design cannot make foreground direct writes wait on local staging or cause the upload task to complete only after both staging and remote upload. The next attempt should decouple the three phases explicitly: seal/stage quickly, commit metadata only after stage, and let a bounded uploader drain staged records without delaying direct foreground progress.
 
+### Attempt 8: Writeback Phase Accounting
+
+Candidate: add diagnostics for the staged-upload bottleneck without changing writeback behavior. The patch tracks local staging in-flight bytes, remote upload in-flight bytes, stage ops/bytes/latency/failures, and metadata commits that happen before local staging completes.
+Branch: `codex/perf-tune-integration`
+Touched files: `brewfs/src/vfs/io/writer.rs`, `brewfs/src/vfs/fs/mod.rs`, `brewfs/src/vfs/stats.rs`, `brewfs/tools/perf/compare_artifacts.py`, `brewfs/docker/compose-xfstests/run_perf_in_container.sh`
+Perf artifact candidate: `brewfs/docker/compose-xfstests/artifacts/perf-run-1781191702-22056`
+
+Validation:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs test_writeback_phase_metrics_track_stage_and_remote_upload --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs render_contains_all_metrics --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs snapshot_exposes_derived_values_without_divide_by_zero --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs vfs::io::writer --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs vfs::stats --lib
+bash -n brewfs/docker/compose-xfstests/run_perf_in_container.sh
+bash brewfs/tools/perf/test_compare_artifacts.sh
+cargo fmt --check
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo clippy -p brewfs --lib -- -D warnings
+```
+
+Perf smoke command:
+
+```bash
+PERF_FIO_DIRECT_MATRIX="0 1" \
+PERF_FIO_RANDRW_RUNTIME=10 \
+PERF_FIO_POST_WRITE_DRAIN=true \
+PERF_FIO_PREFILL_DRAIN_TIMEOUT_SECS=600 \
+BREWFS_COMPRESSION=none \
+BREWFS_PREFETCH_ENABLED=true \
+BREWFS_UPLOAD_CONCURRENCY=32 \
+CARGO_PROFILE_RELEASE_DEBUG=0 \
+bash brewfs/docker/compose-xfstests/run_redis_perf.sh \
+  --writeback-throughput-profile \
+  --tools "fio-randrw"
+```
+
+Smoke result:
+
+| Tool | fio seconds | post-write drain seconds | Stage ops | Stage bytes | Stage latency | Stage failures | Commit before stage | Remote upload in-flight at tool end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `fio-randrw-direct0` | 18 | 16 | 1649 | 2631.2 MiB | 2620.3s | 1 | 443 | 1267.9 MiB |
+| `fio-randrw-direct0-post-write-drained` | n/a | n/a | 1685 | 2764.0 MiB | 2622.7s | 1 | 443 | 0.0 MiB |
+| `fio-randrw-direct1` | 31 | 53 | 695 | 2811.0 MiB | 5395.2s | 0 | 457 | 1467.0 MiB |
+| `fio-randrw-direct1-post-write-drained` | n/a | n/a | 776 | 3212.0 MiB | 5399.4s | 0 | 457 | 0.0 MiB |
+
+Decision: keep as diagnostics if code review stays clean.
+
+Reason: this confirms the first-stage barrier cannot safely sit on the current per-batch `persist_slice` model. The current pipeline stages each upload batch using the same `DirtySliceKey { ino, chunk_id, local_seq: slice_id }`, so multiple batches for one slice share the same local `.slice`, `.tmp`, and `.meta` paths. The nonzero stage failure count is therefore a real reliability signal, not just perf noise. It also shows hundreds of metadata commits before local staging completes, which explains why a naive stage-before-commit barrier badly regressed `direct=1`: it adds a new foreground dependency to a path that currently publishes metadata before staging catches up.
+
 ## Next Target: Staged Upload And Object Count
 
 - Treat `fio-randrw-direct0` object amplification as the primary write-path bottleneck: baseline already shows thousands of PUT ops/GiB written and sub-1MiB average PUT object size.
 - Keep commit-before-upload semantics, but separate foreground commit progress from S3 PUT completion through a bounded staged uploader design, similar to JuiceFS `stage -> metadata commit -> delayed upload`.
 - Do not accept a plain "stage-before-commit barrier" inside the current upload task. Attempt 7 showed that this can improve object aggregation while badly regressing `direct=1` wall time and write tails.
 - Add explicit phase accounting before the next code candidate: time spent staging, time waiting for stage before metadata commit, staged bytes queued for upload, uploader active bytes, and object upload completion lag.
+- Before enforcing any commit-before-stage barrier, fix the staging model so one local durable record corresponds to one logical slice, or give each staged batch a unique durable key and recovery semantics. The current per-batch persist-to-same-key pattern is not a safe barrier foundation.
 - Preserve the current safe path as the default; any staged uploader behavior must be feature-gated and must pass recovery, remount, and post-write-drain checks before becoming part of the throughput profile.
 - Use `compare_artifacts.py` amplification metrics as the acceptance gate. A candidate must reduce PUT ops or tail/backpressure without regressing `direct=1` throughput, p99.9, or post-write drain beyond the existing gates.

@@ -227,6 +227,10 @@ pub(crate) struct SliceState {
     upload_task_active: bool,
     /// True while this slice's bytes are included in pending-upload accounting.
     recent_pending_accounted: bool,
+    /// Bytes successfully persisted to the local writeback stage for this
+    /// slice. This is diagnostic-only for now; early metadata commit still
+    /// keeps the existing behavior.
+    writeback_persisted_bytes: u64,
     data: CacheSlice,
     usage: UsageGuard,
     memory_usage: Option<MemoryUsageGuard>,
@@ -271,6 +275,7 @@ impl SliceState {
             in_flight: 0,
             upload_task_active: false,
             recent_pending_accounted: false,
+            writeback_persisted_bytes: 0,
             data: CacheSlice::new(config),
             usage: UsageGuard::new(usage),
             memory_usage: memory_budget
@@ -291,6 +296,14 @@ impl SliceState {
         if let Some(memory_usage) = &mut self.memory_usage {
             memory_usage.update_bytes(bytes);
         }
+    }
+
+    fn record_writeback_persisted_bytes(&mut self, bytes: u64) {
+        self.writeback_persisted_bytes = self.writeback_persisted_bytes.saturating_add(bytes);
+    }
+
+    fn writeback_fully_persisted(&self) -> bool {
+        self.writeback_persisted_bytes >= self.data.len()
     }
 
     pub(crate) fn can_write(&self, offset: u64, len: usize) -> Option<PageWriteAction> {
@@ -589,6 +602,14 @@ where
             s.notify.notify_waiters();
         });
         self.shared.record_writeback_error(message);
+        self.shared.flush_notify.notify_waiters();
+    }
+
+    fn mark_writeback_persisted(&self, bytes: u64) {
+        self.with_mut(|s| {
+            s.record_writeback_persisted_bytes(bytes);
+            s.notify.notify_waiters();
+        });
         self.shared.flush_notify.notify_waiters();
     }
 
@@ -1050,7 +1071,25 @@ struct RecentPendingUploadState {
     soft_sleep_us: AtomicU64,
     hard_wait_ops: AtomicU64,
     hard_wait_us: AtomicU64,
+    stage_inflight_bytes: Arc<AtomicU64>,
+    remote_upload_inflight_bytes: Arc<AtomicU64>,
+    stage_ops: AtomicU64,
+    stage_bytes: AtomicU64,
+    stage_us: AtomicU64,
+    stage_failures: AtomicU64,
+    commit_before_stage_ops: AtomicU64,
     notify: Notify,
+}
+
+struct InflightBytesGuard {
+    counter: Arc<AtomicU64>,
+    bytes: u64,
+}
+
+impl Drop for InflightBytesGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }
 
 impl RecentPendingUploadState {
@@ -1061,6 +1100,13 @@ impl RecentPendingUploadState {
             soft_sleep_us: AtomicU64::new(0),
             hard_wait_ops: AtomicU64::new(0),
             hard_wait_us: AtomicU64::new(0),
+            stage_inflight_bytes: Arc::new(AtomicU64::new(0)),
+            remote_upload_inflight_bytes: Arc::new(AtomicU64::new(0)),
+            stage_ops: AtomicU64::new(0),
+            stage_bytes: AtomicU64::new(0),
+            stage_us: AtomicU64::new(0),
+            stage_failures: AtomicU64::new(0),
+            commit_before_stage_ops: AtomicU64::new(0),
             notify: Notify::new(),
         }
     }
@@ -1079,6 +1125,37 @@ impl RecentPendingUploadState {
             duration.as_micros().min(u128::from(u64::MAX)) as u64,
             Ordering::Relaxed,
         );
+    }
+
+    fn record_stage_start(&self, bytes: u64) -> Instant {
+        self.stage_inflight_bytes.fetch_add(bytes, Ordering::AcqRel);
+        Instant::now()
+    }
+
+    fn record_stage_finish(&self, start: Instant, bytes: u64, success: bool) {
+        self.stage_inflight_bytes.fetch_sub(bytes, Ordering::AcqRel);
+        self.stage_ops.fetch_add(1, Ordering::Relaxed);
+        self.stage_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.stage_us.fetch_add(
+            start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+        if !success {
+            self.stage_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn track_remote_upload_inflight(&self, bytes: u64) -> InflightBytesGuard {
+        self.remote_upload_inflight_bytes
+            .fetch_add(bytes, Ordering::AcqRel);
+        InflightBytesGuard {
+            counter: self.remote_upload_inflight_bytes.clone(),
+            bytes,
+        }
+    }
+
+    fn record_commit_before_stage(&self) {
+        self.commit_before_stage_ops.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1911,6 +1988,7 @@ where
                     // Spawn a sub-task for this batch of blocks.
                     let shared2 = shared.clone();
                     let wb_ref = shared.write_back.clone();
+                    let slice_for_persist = slice.clone();
                     let ino = shared.inode.ino();
                     let layout = shared.config.layout;
                     let upload_priority = if matches!(
@@ -1926,6 +2004,8 @@ where
                         let persist = wb_ref.as_ref().map(|wb| {
                             let wb = wb.clone();
                             let chunks = all_chunks.clone();
+                            let shared_for_persist = shared2.clone();
+                            let slice_for_persist = slice_for_persist.clone();
                             let key = crate::vfs::cache::keys::DirtySliceKey {
                                 ino,
                                 chunk_id,
@@ -1933,14 +2013,32 @@ where
                                 epoch: 0,
                             };
                             async move {
-                                wb.persist_slice(key, chunks, batch_offset)
+                                let stage_start = shared_for_persist
+                                    .recent_pending_upload
+                                    .record_stage_start(data_len);
+                                let result = wb
+                                    .persist_slice(key, chunks, batch_offset)
                                     .await
-                                    .map(|_| ())
+                                    .map(|_| ());
+                                shared_for_persist
+                                    .recent_pending_upload
+                                    .record_stage_finish(stage_start, data_len, result.is_ok());
+                                if result.is_ok() {
+                                    SliceHandle {
+                                        slice: &slice_for_persist,
+                                        shared: &shared_for_persist,
+                                    }
+                                    .mark_writeback_persisted(data_len);
+                                }
+                                result
                             }
                         });
 
                         let uploader = DataUploader::new(layout, &shared2.backend);
                         let upload = async {
+                            let _remote_upload = shared2
+                                .recent_pending_upload
+                                .track_remote_upload_inflight(data_len);
                             backoff(UPLOAD_MAX_RETRIES, || async {
                                 match uploader
                                     .write_at_vectored_with_priority_and_limit(
@@ -2288,18 +2386,25 @@ where
                         let desc = handle.desc_for_commit();
 
                         if let Some(desc) = desc {
-                            let claimed = {
+                            let (claimed, commit_before_stage) = {
                                 let mut s = slice.lock();
                                 if s.meta_write_started {
-                                    false
+                                    (false, false)
                                 } else {
                                     s.meta_write_started = true;
-                                    true
+                                    (
+                                        true,
+                                        shared.write_back.is_some()
+                                            && !s.writeback_fully_persisted(),
+                                    )
                                 }
                             };
 
                             if !claimed {
                                 continue;
+                            }
+                            if commit_before_stage {
+                                shared.recent_pending_upload.record_commit_before_stage();
                             }
 
                             let (ino, chunk_index) = extract_ino_and_chunk_index(desc.chunk_id);
@@ -2831,6 +2936,13 @@ pub(crate) struct WritebackDirtyBreakdown {
     pub backpressure_soft_sleep_us: u64,
     pub backpressure_hard_wait_ops: u64,
     pub backpressure_hard_wait_us: u64,
+    pub stage_inflight_bytes: u64,
+    pub remote_upload_inflight_bytes: u64,
+    pub stage_ops: u64,
+    pub stage_bytes: u64,
+    pub stage_us: u64,
+    pub stage_failures: u64,
+    pub commit_before_stage_ops: u64,
 }
 
 impl<B, M> DataWriter<B, M>
@@ -2908,6 +3020,28 @@ where
             backpressure_hard_wait_us: self
                 .recent_pending_upload
                 .hard_wait_us
+                .load(Ordering::Relaxed),
+            stage_inflight_bytes: self
+                .recent_pending_upload
+                .stage_inflight_bytes
+                .load(Ordering::Acquire),
+            remote_upload_inflight_bytes: self
+                .recent_pending_upload
+                .remote_upload_inflight_bytes
+                .load(Ordering::Acquire),
+            stage_ops: self.recent_pending_upload.stage_ops.load(Ordering::Relaxed),
+            stage_bytes: self
+                .recent_pending_upload
+                .stage_bytes
+                .load(Ordering::Relaxed),
+            stage_us: self.recent_pending_upload.stage_us.load(Ordering::Relaxed),
+            stage_failures: self
+                .recent_pending_upload
+                .stage_failures
+                .load(Ordering::Relaxed),
+            commit_before_stage_ops: self
+                .recent_pending_upload
+                .commit_before_stage_ops
                 .load(Ordering::Relaxed),
             ..WritebackDirtyBreakdown::default()
         };
@@ -3195,6 +3329,62 @@ mod tests {
             }
             _ => panic!("expected max soft sleep at the hard boundary"),
         }
+    }
+
+    #[test]
+    fn test_writeback_phase_metrics_track_stage_and_remote_upload() {
+        let state = Arc::new(RecentPendingUploadState::new());
+
+        let stage_start = state.record_stage_start(4096);
+        std::thread::sleep(Duration::from_micros(10));
+        state.record_stage_finish(stage_start, 4096, true);
+
+        {
+            let _remote_upload = state.track_remote_upload_inflight(8192);
+            assert_eq!(
+                state.remote_upload_inflight_bytes.load(Ordering::Acquire),
+                8192
+            );
+        }
+
+        state.record_commit_before_stage();
+
+        assert_eq!(state.stage_inflight_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            state.remote_upload_inflight_bytes.load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(state.stage_ops.load(Ordering::Relaxed), 1);
+        assert_eq!(state.stage_bytes.load(Ordering::Relaxed), 4096);
+        assert!(state.stage_us.load(Ordering::Relaxed) > 0);
+        assert_eq!(state.stage_failures.load(Ordering::Relaxed), 0);
+        assert_eq!(state.commit_before_stage_ops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_slice_writeback_stage_completion_requires_all_bytes() {
+        let layout = ChunkLayout {
+            chunk_size: 16 * 1024,
+            block_size: 4 * 1024,
+        };
+        let mut slice = SliceState::new(
+            1,
+            0,
+            test_config_with_writeback(layout, WriteBackMode::CommitBeforeUpload),
+            Arc::new(AtomicU64::new(0)),
+            None,
+            0,
+        );
+        slice.data.append(&vec![1u8; 8192]).unwrap();
+
+        slice.record_writeback_persisted_bytes(4096);
+        assert!(
+            !slice.writeback_fully_persisted(),
+            "a single staged batch must not make the whole slice look durable"
+        );
+
+        slice.record_writeback_persisted_bytes(4096);
+        assert!(slice.writeback_fully_persisted());
     }
 
     fn blocks_len(data: &[(usize, Vec<Bytes>)]) -> usize {

@@ -783,6 +783,15 @@ where
                         dirty.backpressure_hard_wait_ops,
                         dirty.backpressure_hard_wait_us,
                     );
+                    fuse_stats.sync_writeback_phase_metrics(
+                        dirty.stage_inflight_bytes,
+                        dirty.remote_upload_inflight_bytes,
+                        dirty.stage_ops,
+                        dirty.stage_bytes,
+                        dirty.stage_us,
+                        dirty.stage_failures,
+                        dirty.commit_before_stage_ops,
+                    );
                     if let Some(object_metrics) = &object_metrics {
                         let object = object_metrics.snapshot();
                         fuse_stats.sync_object_store_metrics(

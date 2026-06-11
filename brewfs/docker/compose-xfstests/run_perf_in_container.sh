@@ -1538,6 +1538,15 @@ if brewfs_stats_paths:
         range_gets = metrics.get("brewfs_read_range_gets_total", 0.0)
         full_gets = metrics.get("brewfs_read_full_gets_total", 0.0)
         bg_prefetch = metrics.get("brewfs_read_background_prefetch_total", 0.0)
+        stage_ops = metrics.get("brewfs_writeback_stage_ops_total", 0.0)
+        stage_bytes = metrics.get("brewfs_writeback_stage_bytes_total", 0.0)
+        stage_ms = metrics.get("brewfs_writeback_stage_lat_us_total", 0.0) / 1000.0
+        stage_failures = metrics.get("brewfs_writeback_stage_failures_total", 0.0)
+        commit_before_stage = metrics.get(
+            "brewfs_writeback_commit_before_stage_ops_total",
+            0.0,
+        )
+        remote_inflight = metrics.get("brewfs_writeback_remote_upload_inflight_bytes", 0.0)
         rel = path.relative_to(artifact_dir)
         lines.append(
             f"| {tool} | {hit_ratio * 100.0:.1f}% ({int(hits)}/{int(requests)}) | "
@@ -1545,7 +1554,10 @@ if brewfs_stats_paths:
             f"{fmt_mib(live_dirty)} | {fmt_mib(recent_pending)} | {fmt_mib(recent_uploaded)} | "
             f"{fmt_mib(read_buffer)} | GET={int(s3_get)}, PUT={int(s3_put)} | "
             f"GET={s3_get_avg_ms:.2f} ms, PUT={s3_put_avg_ms:.2f} ms | "
-            f"{rel}; range={int(range_gets)}, full={int(full_gets)}, bg_prefetch={int(bg_prefetch)} |"
+            f"{rel}; range={int(range_gets)}, full={int(full_gets)}, bg_prefetch={int(bg_prefetch)}, "
+            f"stage={int(stage_ops)} ops/{fmt_mib(stage_bytes)}/{stage_ms:.1f} ms, "
+            f"stage_fail={int(stage_failures)}, commit_before_stage={int(commit_before_stage)}, "
+            f"remote_inflight={fmt_mib(remote_inflight)} |"
         )
 
 fuse_log = artifact_dir / "brewfs_fuse_ops.log"
