@@ -1572,6 +1572,34 @@ if brewfs_stats_paths:
             0.0,
         )
         partial_tail_auto = metrics.get("brewfs_writeback_upload_partial_tail_auto_ops_total", 0.0)
+        partial_tail_auto_age = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_age_ops_total",
+            0.0,
+        )
+        partial_tail_auto_idle = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_idle_ops_total",
+            0.0,
+        )
+        partial_tail_auto_pressure = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_pressure_ops_total",
+            0.0,
+        )
+        partial_tail_auto_too_many = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_too_many_ops_total",
+            0.0,
+        )
+        partial_tail_auto_buffer_high = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_buffer_high_ops_total",
+            0.0,
+        )
+        partial_tail_auto_flush_duration = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_flush_duration_ops_total",
+            0.0,
+        )
+        partial_tail_auto_unknown = metrics.get(
+            "brewfs_writeback_upload_partial_tail_auto_unknown_ops_total",
+            0.0,
+        )
         partial_tail_age = metrics.get(
             "brewfs_writeback_upload_partial_tail_commit_age_ops_total",
             0.0,
@@ -1602,6 +1630,11 @@ if brewfs_stats_paths:
             f"(size {int(partial_tail_size)}/max {int(partial_tail_max)}/"
             f"flush {int(partial_tail_flush)}/auto {int(partial_tail_auto)}/"
             f"age {int(partial_tail_age)}), "
+            f"auto_detail=age {int(partial_tail_auto_age)}/idle {int(partial_tail_auto_idle)}/"
+            f"pressure {int(partial_tail_auto_pressure)}/too_many {int(partial_tail_auto_too_many)}/"
+            f"buffer_high {int(partial_tail_auto_buffer_high)}/"
+            f"flush_duration {int(partial_tail_auto_flush_duration)}/"
+            f"unknown {int(partial_tail_auto_unknown)}, "
             f"freeze=size {int(freeze_size)}/flush {int(freeze_flush)}/auto {int(freeze_auto)}/"
             f"max {int(freeze_max)}/age {int(freeze_age)} |"
         )

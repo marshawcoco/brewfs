@@ -227,3 +227,230 @@ Interpretation:
 
 - Delaying cached sub-block sealing too broadly shifts cost into dirty/backpressure queues: `writeback_hard_wait_ms` grew from about 9.3M to 28.4M in direct0.
 - The next attempt should avoid holding dirty data longer globally. Prefer either per-reason metrics first, or a narrower change that reduces object count without increasing recent-pending hard waits.
+
+## Post-Candidate B Attribution
+
+Candidate C first step is observability, not behavior change.
+
+Artifact after adding partial-tail attribution by top-level freeze reason:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781201913-31389
+```
+
+Direct0-only result:
+
+```text
+direct0:
+  tool_wall_s=81, write_bw_mib_s=88.3, post_write_drain_s=16
+  s3_put_ops=12440, fuse_write_mib=6032.0
+  put_ops_per_gib_written=2111.8
+  avg_upload_batch_mib=0.483
+  partial_tail_ratio=0.957
+  partial_tail_total=11896
+  partial_tail_auto=10988
+  partial_tail_explicit_flush=815
+  partial_tail_max_unflushed=29
+  partial_tail_size=64
+  partial_tail_commit_age=0
+```
+
+Interpretation:
+
+- Remaining direct0 partial-tail uploads are overwhelmingly from `Auto`: about 92.4% of all partial-tail batches in this run.
+- Candidate A fixed premature `MaxUnflushed` sealing, but did not answer which auto trigger still seals the tail: max-age, idle, memory pressure, too-many-slices, or buffer-high.
+- Next instrumentation should split `Auto` partial-tail uploads by trigger before another behavior change.
+
+## Rejected Config: Pending Backpressure 2G/4G
+
+Hypothesis:
+
+- Raise `BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES` to 2GiB and hard limit to 4GiB.
+- If hard waits are dominating, the higher threshold should reduce backpressure without code changes.
+
+Command:
+
+```bash
+BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES=2147483648 \
+BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES=4294967296 \
+PERF_TOOLS="fio-randrw" \
+PERF_FIO_DIRECT_MATRIX="0" \
+PERF_FIO_POST_WRITE_DRAIN=true \
+PERF_FIO_POST_WRITE_DRAIN_TIMEOUT_SECS=900 \
+bash brewfs/docker/compose-xfstests/run_redis_perf.sh \
+  --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-randrw"
+```
+
+Artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781202337-31807
+```
+
+Result versus the direct0 attribution run:
+
+```text
+direct0:
+  tool_wall_s=143 vs 81
+  write_bw_mib_s=69.2 vs 88.3
+  put_ops_per_gib_written=2550.5 vs 2111.8
+  avg_upload_batch_mib=0.392 vs 0.483
+  partial_tail_ratio=0.965 vs 0.957
+  partial_tail_auto=21058 vs 10988
+  post_write_drain_s=0 vs 16
+```
+
+Decision:
+
+- Reject this config for randrw.
+- It hides drain and hard-wait symptoms by allowing a larger backlog, but the main fio runtime, write bandwidth, object count, and auto partial-tail count all worsen.
+
+## Candidate C
+
+Goal:
+
+- Split `Auto` partial-tail attribution by trigger:
+  `age`, `idle`, `pressure`, `too_many`, `buffer_high`, `flush_duration`, and `unknown`.
+- Keep behavior unchanged in this step.
+- Use direct0 perf to decide the next behavior candidate:
+  if `age` dominates, test a narrow cached sub-block age deferral;
+  if `pressure` dominates, test full-block-first pressure flushing;
+  if `too_many` dominates, test slice-count policy changes;
+  if `buffer_high` dominates, tune buffer-driven flushing.
+
+Verification:
+
+```bash
+CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target CARGO_INCREMENTAL=0 \
+  cargo test -p brewfs --lib 'vfs::io::writer::tests::'
+
+CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target CARGO_INCREMENTAL=0 \
+  cargo test -p brewfs --lib 'vfs::stats::tests::'
+
+bash brewfs/tools/perf/test_compare_artifacts.sh
+python3 -m py_compile brewfs/tools/perf/compare_artifacts.py
+bash -n brewfs/docker/compose-xfstests/run_perf_in_container.sh
+
+CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target CARGO_INCREMENTAL=0 \
+  cargo clippy -p brewfs --lib -- -D warnings
+```
+
+Perf gate:
+
+```bash
+PERF_TOOLS="fio-randrw" \
+PERF_FIO_DIRECT_MATRIX="0" \
+PERF_FIO_POST_WRITE_DRAIN=true \
+PERF_FIO_POST_WRITE_DRAIN_TIMEOUT_SECS=900 \
+bash brewfs/docker/compose-xfstests/run_redis_perf.sh \
+  --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-randrw"
+```
+
+## Candidate C Result
+
+Implementation:
+
+- Added auto partial-tail trigger attribution:
+  `age`, `idle`, `pressure`, `too_many`, `buffer_high`, `flush_duration`, and `unknown`.
+- Kept flush/freeze behavior unchanged.
+- Extended `.stats`, perf report, and `compare_artifacts.py` mapping.
+
+Verification completed:
+
+```text
+cargo test -p brewfs --lib 'vfs::io::writer::tests::'  # 30 passed
+cargo test -p brewfs --lib 'vfs::stats::tests::'        # 3 passed
+bash brewfs/tools/perf/test_compare_artifacts.sh        # passed
+python3 -m py_compile brewfs/tools/perf/compare_artifacts.py
+bash -n brewfs/docker/compose-xfstests/run_perf_in_container.sh
+cargo clippy -p brewfs --lib -- -D warnings
+```
+
+Direct0 artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781203850-6552
+```
+
+Direct0 result versus `perf-run-1781201913-31389`:
+
+```text
+tool_wall_s=78 vs 81
+write_bw_mib_s=91.4 vs 88.3
+post_write_drain_s=2 vs 16
+post-drained put_ops_per_gib_written=2021.3 vs 2111.8
+avg_upload_batch_mib=0.505 vs 0.483
+partial_tail_ratio=0.956 vs 0.957
+partial_tail_total=11577
+partial_tail_auto=10833
+  auto_age=10640
+  auto_too_many=193
+  auto_idle=0
+  auto_pressure=0
+  auto_buffer_high=0
+  auto_flush_duration=0
+  auto_unknown=0
+```
+
+Direct1 guard artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781204206-4747
+```
+
+Direct1 guard versus `perf-run-1781199012-6131`:
+
+```text
+write_bw_mib_s=110.5 vs 85.9
+read_bw_mib_s=247.2 vs 190.4
+post_write_drain_s=30 vs 18
+post-drained put_ops_per_gib_written=259.9 vs 258.6
+avg_upload_batch_mib=4.024 vs 4.091
+partial_tail_ratio=0.032 vs 0.032
+partial_tail_auto=48
+  auto_age=48
+```
+
+Decision:
+
+- Accept Candidate C as useful observability.
+- It does not attempt to improve behavior, but it identifies the next high-confidence bottleneck: `auto_age`.
+- Direct0 did not regress in the measured run, and direct1 object amplification stayed effectively flat.
+- Direct1 drain was longer than the best guard run, but the run also wrote 27% more data and had substantially higher read/write throughput; treat this as a guard to watch on behavior changes, not a reason to reject instrumentation.
+
+## Candidate D
+
+Goal:
+
+- Reduce direct0 partial-tail object amplification by narrowing the `auto_age` trigger for cached-writeback sub-block slices.
+- Preserve strict `flush()/fsync()/close()/truncate()` semantics.
+- Preserve direct1 object shape and post-write drain.
+
+Hypothesis:
+
+- For direct0/kernel writeback cache, many tiny slices are being sealed solely because they are older than `auto_flush_max_age` (500ms in the perf profile).
+- If a cached-writeback slice is still smaller than one block, `auto_age` should not immediately seal it. It should stay writable until it reaches a full block, hits explicit flush, hits memory pressure, or becomes constrained by too-many-slices cleanup.
+
+Guard rails:
+
+- Do not change explicit flush, fsync, close, truncate, or commit-age safety.
+- Do not disable memory-pressure flush.
+- Do not defer direct1/non-cached sub-block auto-age slices until a test proves it is safe.
+- Reject if direct0 write bandwidth falls by more than 5%, hard-wait time grows materially, direct1 post-drain worsens materially, or direct1 PUT/GiB worsens by more than 5%.
+
+Candidate D test target:
+
+```text
+test_auto_flush_defers_cached_sub_block_age_freeze_until_explicit_flush
+```
+
+Expected movement:
+
+- direct0 `writeback_upload_partial_tail_auto_age_ops` decreases.
+- direct0 `put_ops_per_gib_written` decreases.
+- direct0 `writeback_avg_upload_batch_mib` increases.
+- direct1 `writeback_partial_tail_ratio` remains about 0.03 and `avg_upload_batch_mib` remains about 4MiB.

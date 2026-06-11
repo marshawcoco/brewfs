@@ -822,6 +822,13 @@ where
                         dirty.upload_partial_tail_max_unflushed_ops,
                         dirty.upload_partial_tail_explicit_flush_ops,
                         dirty.upload_partial_tail_auto_ops,
+                        dirty.upload_partial_tail_auto_age_ops,
+                        dirty.upload_partial_tail_auto_idle_ops,
+                        dirty.upload_partial_tail_auto_pressure_ops,
+                        dirty.upload_partial_tail_auto_too_many_ops,
+                        dirty.upload_partial_tail_auto_buffer_high_ops,
+                        dirty.upload_partial_tail_auto_flush_duration_ops,
+                        dirty.upload_partial_tail_auto_unknown_ops,
                         dirty.upload_partial_tail_commit_age_ops,
                     );
                     if let Some(object_metrics) = &object_metrics {

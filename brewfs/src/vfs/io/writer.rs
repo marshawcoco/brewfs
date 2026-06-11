@@ -212,6 +212,16 @@ enum SliceFreezeReason {
     CommitAgeSafety,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AutoFreezeTrigger {
+    Age,
+    Idle,
+    Pressure,
+    TooMany,
+    BufferHigh,
+    FlushDuration,
+}
+
 pub(crate) struct SliceState {
     state: SliceStatus,
     /// ID of the chunk it belongs to.
@@ -256,6 +266,8 @@ pub(crate) struct SliceState {
     meta_write_started: bool,
     /// Reason this slice was sealed. Used to attribute partial-tail uploads.
     freeze_reason: Option<SliceFreezeReason>,
+    /// More precise trigger for auto freezes. Used only when `freeze_reason` is `Auto`.
+    auto_freeze_trigger: Option<AutoFreezeTrigger>,
     /// FUSE request unique id that created this slice, used to order overlapping
     /// slices for correct commit sequencing (lower unique = older data = commit first).
     creation_unique: u64,
@@ -298,6 +310,7 @@ impl SliceState {
             frozen_epoch: 0,
             meta_write_started: false,
             freeze_reason: None,
+            auto_freeze_trigger: None,
             creation_unique,
             max_write_unique: creation_unique,
         }
@@ -491,6 +504,18 @@ where
     }
 
     fn freeze_with_reason(&self, reason: SliceFreezeReason) -> bool {
+        self.freeze_with_reason_and_auto_trigger(reason, None)
+    }
+
+    fn freeze_auto_with_trigger(&self, trigger: AutoFreezeTrigger) -> bool {
+        self.freeze_with_reason_and_auto_trigger(SliceFreezeReason::Auto, Some(trigger))
+    }
+
+    fn freeze_with_reason_and_auto_trigger(
+        &self,
+        reason: SliceFreezeReason,
+        auto_trigger: Option<AutoFreezeTrigger>,
+    ) -> bool {
         let mut empty_committed = false;
         let mut frozen_bytes = 0u64;
         let froze = self.with_mut(|s| {
@@ -510,6 +535,11 @@ where
             s.state = SliceStatus::Readonly;
             s.frozen_epoch = self.shared.inode.data_epoch();
             s.freeze_reason = Some(reason);
+            s.auto_freeze_trigger = if matches!(reason, SliceFreezeReason::Auto) {
+                auto_trigger
+            } else {
+                None
+            };
             s.data.freeze();
 
             if s.in_flight == 0 && !s.has_idle_block() {
@@ -691,11 +721,14 @@ where
                 SliceStatus::Readonly | SliceStatus::Failed | SliceStatus::Committed
             ) && s.data.len() % block_size != 0
                 && end as u64 * block_size >= s.data.len();
+            let partial_tail_reason = s.freeze_reason;
+            let partial_tail_auto_trigger = s.auto_freeze_trigger;
             self.shared.recent_pending_upload.record_upload_batch(
                 data_len,
                 (end - start) as u64,
                 partial_tail,
-                s.freeze_reason,
+                partial_tail_reason,
+                partial_tail_auto_trigger,
             );
 
             Ok(Some(UploadPlan {
@@ -1177,6 +1210,13 @@ struct RecentPendingUploadState {
     upload_partial_tail_max_unflushed_ops: AtomicU64,
     upload_partial_tail_explicit_flush_ops: AtomicU64,
     upload_partial_tail_auto_ops: AtomicU64,
+    upload_partial_tail_auto_age_ops: AtomicU64,
+    upload_partial_tail_auto_idle_ops: AtomicU64,
+    upload_partial_tail_auto_pressure_ops: AtomicU64,
+    upload_partial_tail_auto_too_many_ops: AtomicU64,
+    upload_partial_tail_auto_buffer_high_ops: AtomicU64,
+    upload_partial_tail_auto_flush_duration_ops: AtomicU64,
+    upload_partial_tail_auto_unknown_ops: AtomicU64,
     upload_partial_tail_commit_age_ops: AtomicU64,
     notify: Notify,
 }
@@ -1229,6 +1269,13 @@ impl RecentPendingUploadState {
             upload_partial_tail_max_unflushed_ops: AtomicU64::new(0),
             upload_partial_tail_explicit_flush_ops: AtomicU64::new(0),
             upload_partial_tail_auto_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_age_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_idle_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_pressure_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_too_many_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_buffer_high_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_flush_duration_ops: AtomicU64::new(0),
+            upload_partial_tail_auto_unknown_ops: AtomicU64::new(0),
             upload_partial_tail_commit_age_ops: AtomicU64::new(0),
             notify: Notify::new(),
         }
@@ -1325,6 +1372,7 @@ impl RecentPendingUploadState {
         blocks: u64,
         partial_tail: bool,
         partial_tail_reason: Option<SliceFreezeReason>,
+        partial_tail_auto_trigger: Option<AutoFreezeTrigger>,
     ) {
         self.upload_batch_ops.fetch_add(1, Ordering::Relaxed);
         self.upload_batch_bytes.fetch_add(bytes, Ordering::Relaxed);
@@ -1343,6 +1391,26 @@ impl RecentPendingUploadState {
                     SliceFreezeReason::CommitAgeSafety => &self.upload_partial_tail_commit_age_ops,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
+                if matches!(reason, SliceFreezeReason::Auto) {
+                    let auto_counter = match partial_tail_auto_trigger {
+                        Some(AutoFreezeTrigger::Age) => &self.upload_partial_tail_auto_age_ops,
+                        Some(AutoFreezeTrigger::Idle) => &self.upload_partial_tail_auto_idle_ops,
+                        Some(AutoFreezeTrigger::Pressure) => {
+                            &self.upload_partial_tail_auto_pressure_ops
+                        }
+                        Some(AutoFreezeTrigger::TooMany) => {
+                            &self.upload_partial_tail_auto_too_many_ops
+                        }
+                        Some(AutoFreezeTrigger::BufferHigh) => {
+                            &self.upload_partial_tail_auto_buffer_high_ops
+                        }
+                        Some(AutoFreezeTrigger::FlushDuration) => {
+                            &self.upload_partial_tail_auto_flush_duration_ops
+                        }
+                        None => &self.upload_partial_tail_auto_unknown_ops,
+                    };
+                    auto_counter.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -1542,7 +1610,7 @@ where
                     && s.data.len() > 0
                     && s.last_mod.elapsed() >= Duration::from_millis(10)
             });
-            if should_try && handle.freeze_with_reason(SliceFreezeReason::Auto) {
+            if should_try && handle.freeze_auto_with_trigger(AutoFreezeTrigger::Pressure) {
                 Self::spawn_flush_slice(self.shared.clone(), slice);
                 flushed += 1;
                 if flushed >= PRESSURE_FLUSH_LIMIT {
@@ -3021,31 +3089,42 @@ where
                         // already frozen the slice and kicked off the upload,
                         // so flush only waits for in-flight work to land.
                         let auto_flush_max = shared.config.auto_flush_max_age;
-                        let mut should = age > auto_flush_max
-                            || (idle_time > idle && age > idle)
-                            || age > FLUSH_DURATION;
-                        if !should && force_pressure_flush && idle_time >= Duration::from_millis(10)
+                        let mut trigger = if age > auto_flush_max {
+                            Some(AutoFreezeTrigger::Age)
+                        } else if idle_time > idle && age > idle {
+                            Some(AutoFreezeTrigger::Idle)
+                        } else if age > FLUSH_DURATION {
+                            Some(AutoFreezeTrigger::FlushDuration)
+                        } else {
+                            None
+                        };
+                        if trigger.is_none()
+                            && force_pressure_flush
+                            && idle_time >= Duration::from_millis(10)
                         {
-                            should = true;
+                            trigger = Some(AutoFreezeTrigger::Pressure);
                         }
-                        if !should && too_many {
+                        if trigger.is_none() && too_many {
                             // idx <= half represents older slices.
                             if chunk_idx % 2 == pick_bit && idx <= half {
-                                should = true;
+                                trigger = Some(AutoFreezeTrigger::TooMany);
                             }
                         }
                         // Proactive size-based flush: freeze slices with enough
                         // data when the buffer is filling up, even if they haven't
                         // reached auto_flush_max_age.
-                        if !should
+                        if trigger.is_none()
                             && buffer_high
                             && data_len >= shared.config.freeze_min_bytes
                             && idle_time >= Duration::from_millis(5)
                         {
-                            should = true;
+                            trigger = Some(AutoFreezeTrigger::BufferHigh);
                         }
 
-                        if should && handle.freeze_with_reason(SliceFreezeReason::Auto) {
+                        if let Some(trigger) = trigger {
+                            if !handle.freeze_auto_with_trigger(trigger) {
+                                continue;
+                            }
                             tracing::debug!(
                                 age_ms = age.as_millis(),
                                 idle_ms = idle_time.as_millis(),
@@ -3157,6 +3236,13 @@ pub(crate) struct WritebackDirtyBreakdown {
     pub upload_partial_tail_max_unflushed_ops: u64,
     pub upload_partial_tail_explicit_flush_ops: u64,
     pub upload_partial_tail_auto_ops: u64,
+    pub upload_partial_tail_auto_age_ops: u64,
+    pub upload_partial_tail_auto_idle_ops: u64,
+    pub upload_partial_tail_auto_pressure_ops: u64,
+    pub upload_partial_tail_auto_too_many_ops: u64,
+    pub upload_partial_tail_auto_buffer_high_ops: u64,
+    pub upload_partial_tail_auto_flush_duration_ops: u64,
+    pub upload_partial_tail_auto_unknown_ops: u64,
     pub upload_partial_tail_commit_age_ops: u64,
 }
 
@@ -3345,6 +3431,34 @@ where
             upload_partial_tail_auto_ops: self
                 .recent_pending_upload
                 .upload_partial_tail_auto_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_age_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_age_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_idle_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_idle_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_pressure_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_pressure_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_too_many_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_too_many_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_buffer_high_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_buffer_high_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_flush_duration_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_flush_duration_ops
+                .load(Ordering::Relaxed),
+            upload_partial_tail_auto_unknown_ops: self
+                .recent_pending_upload
+                .upload_partial_tail_auto_unknown_ops
                 .load(Ordering::Relaxed),
             upload_partial_tail_commit_age_ops: self
                 .recent_pending_upload
@@ -4495,6 +4609,51 @@ mod tests {
         assert_eq!(after_flush.upload_partial_tail_explicit_flush_ops, 1);
         assert_eq!(after_flush.upload_partial_tail_auto_ops, 0);
         assert_eq!(after_flush.upload_partial_tail_max_unflushed_ops, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_auto_flush_age_partial_tail_is_attributed() {
+        let layout = ChunkLayout {
+            chunk_size: 16 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "auto_age_partial_tail_metrics.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = Arc::new(DataWriter::new(test_config(layout), backend, reader, None));
+        let file_writer = writer.ensure_file(inode);
+
+        file_writer.write_at(0, &[9u8; 1024]).await.unwrap();
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let breakdown = writer.dirty_breakdown().await;
+                if breakdown.upload_partial_tail_auto_age_ops == 1 {
+                    assert_eq!(breakdown.upload_partial_tail_ops, 1);
+                    assert_eq!(breakdown.upload_partial_tail_auto_ops, 1);
+                    assert_eq!(breakdown.upload_partial_tail_auto_idle_ops, 0);
+                    assert_eq!(breakdown.upload_partial_tail_auto_pressure_ops, 0);
+                    assert_eq!(breakdown.upload_partial_tail_auto_too_many_ops, 0);
+                    assert_eq!(breakdown.upload_partial_tail_auto_buffer_high_ops, 0);
+                    assert_eq!(breakdown.upload_partial_tail_auto_flush_duration_ops, 0);
+                    assert_eq!(breakdown.upload_partial_tail_auto_unknown_ops, 0);
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("auto age partial-tail upload should be attributed");
     }
 
     #[tokio::test]

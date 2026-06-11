@@ -361,6 +361,41 @@ STAT_METRICS = {
         "ops",
         1.0,
     ),
+    "brewfs_writeback_upload_partial_tail_auto_age_ops_total": (
+        "writeback_upload_partial_tail_auto_age_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_partial_tail_auto_idle_ops_total": (
+        "writeback_upload_partial_tail_auto_idle_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_partial_tail_auto_pressure_ops_total": (
+        "writeback_upload_partial_tail_auto_pressure_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_partial_tail_auto_too_many_ops_total": (
+        "writeback_upload_partial_tail_auto_too_many_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_partial_tail_auto_buffer_high_ops_total": (
+        "writeback_upload_partial_tail_auto_buffer_high_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_partial_tail_auto_flush_duration_ops_total": (
+        "writeback_upload_partial_tail_auto_flush_duration_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_partial_tail_auto_unknown_ops_total": (
+        "writeback_upload_partial_tail_auto_unknown_ops",
+        "ops",
+        1.0,
+    ),
     "brewfs_writeback_upload_partial_tail_commit_age_ops_total": (
         "writeback_upload_partial_tail_commit_age_ops",
         "ops",

@@ -91,6 +91,13 @@ brewfs_writeback_upload_partial_tail_size_ops_total 0
 brewfs_writeback_upload_partial_tail_max_unflushed_ops_total 1
 brewfs_writeback_upload_partial_tail_explicit_flush_ops_total $((partial_tail_ops / 2))
 brewfs_writeback_upload_partial_tail_auto_ops_total $((partial_tail_ops - partial_tail_ops / 2 - 1))
+brewfs_writeback_upload_partial_tail_auto_age_ops_total $((partial_tail_ops - partial_tail_ops / 2 - 1))
+brewfs_writeback_upload_partial_tail_auto_idle_ops_total 0
+brewfs_writeback_upload_partial_tail_auto_pressure_ops_total 0
+brewfs_writeback_upload_partial_tail_auto_too_many_ops_total 0
+brewfs_writeback_upload_partial_tail_auto_buffer_high_ops_total 0
+brewfs_writeback_upload_partial_tail_auto_flush_duration_ops_total 0
+brewfs_writeback_upload_partial_tail_auto_unknown_ops_total 0
 brewfs_writeback_upload_partial_tail_commit_age_ops_total 0
 EOF
 }
@@ -219,6 +226,7 @@ grep -F $'stats	fio-randrw-direct1	writeback_freeze_explicit_flush_ops	2.000	2.0
 grep -F $'stats	fio-randrw-direct1	writeback_upload_batch_mib	64.000	128.000	+100.0	MiB' "$tmp_dir/out.tsv" >/dev/null
 grep -F $'stats	fio-randrw-direct1	writeback_upload_partial_tail_explicit_flush_ops	1.000	2.000	+100.0	ops' "$tmp_dir/out.tsv" >/dev/null
 grep -F $'stats	fio-randrw-direct1	writeback_upload_partial_tail_auto_ops	0.000	1.000		ops' "$tmp_dir/out.tsv" >/dev/null
+grep -F $'stats	fio-randrw-direct1	writeback_upload_partial_tail_auto_age_ops	0.000	1.000		ops' "$tmp_dir/out.tsv" >/dev/null
 grep -F $'amplification	fio-randrw-direct1	upload_byte_amp	0.250	0.500	+100.0	ratio' "$tmp_dir/out.tsv" >/dev/null
 grep -F $'amplification	fio-randrw-direct1	put_ops_per_gib_written	64.000	128.000	+100.0	ops/GiB' "$tmp_dir/out.tsv" >/dev/null
 grep -F $'amplification	fio-randrw-direct1	writeback_avg_upload_batch_mib	8.000	16.000	+100.0	MiB/op' "$tmp_dir/out.tsv" >/dev/null

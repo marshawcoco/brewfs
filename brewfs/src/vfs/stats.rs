@@ -113,6 +113,13 @@ pub struct FsStatsSnapshot {
     pub writeback_upload_partial_tail_max_unflushed_ops: u64,
     pub writeback_upload_partial_tail_explicit_flush_ops: u64,
     pub writeback_upload_partial_tail_auto_ops: u64,
+    pub writeback_upload_partial_tail_auto_age_ops: u64,
+    pub writeback_upload_partial_tail_auto_idle_ops: u64,
+    pub writeback_upload_partial_tail_auto_pressure_ops: u64,
+    pub writeback_upload_partial_tail_auto_too_many_ops: u64,
+    pub writeback_upload_partial_tail_auto_buffer_high_ops: u64,
+    pub writeback_upload_partial_tail_auto_flush_duration_ops: u64,
+    pub writeback_upload_partial_tail_auto_unknown_ops: u64,
     pub writeback_upload_partial_tail_commit_age_ops: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
@@ -387,6 +394,20 @@ pub struct FsStats {
     pub writeback_upload_partial_tail_explicit_flush_ops: AtomicU64,
     /// Partial-tail upload batches from auto flush freezes.
     pub writeback_upload_partial_tail_auto_ops: AtomicU64,
+    /// Partial-tail auto upload batches caused by max-age auto flush.
+    pub writeback_upload_partial_tail_auto_age_ops: AtomicU64,
+    /// Partial-tail auto upload batches caused by idle auto flush.
+    pub writeback_upload_partial_tail_auto_idle_ops: AtomicU64,
+    /// Partial-tail auto upload batches caused by memory pressure.
+    pub writeback_upload_partial_tail_auto_pressure_ops: AtomicU64,
+    /// Partial-tail auto upload batches caused by too many live slices.
+    pub writeback_upload_partial_tail_auto_too_many_ops: AtomicU64,
+    /// Partial-tail auto upload batches caused by high buffer usage.
+    pub writeback_upload_partial_tail_auto_buffer_high_ops: AtomicU64,
+    /// Partial-tail auto upload batches caused by flush-duration safety.
+    pub writeback_upload_partial_tail_auto_flush_duration_ops: AtomicU64,
+    /// Partial-tail auto upload batches without trigger attribution.
+    pub writeback_upload_partial_tail_auto_unknown_ops: AtomicU64,
     /// Partial-tail upload batches from commit-age safety freezes.
     pub writeback_upload_partial_tail_commit_age_ops: AtomicU64,
     /// Block cache hit count
@@ -535,6 +556,13 @@ impl FsStats {
             writeback_upload_partial_tail_max_unflushed_ops: AtomicU64::new(0),
             writeback_upload_partial_tail_explicit_flush_ops: AtomicU64::new(0),
             writeback_upload_partial_tail_auto_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_age_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_idle_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_pressure_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_too_many_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_buffer_high_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_flush_duration_ops: AtomicU64::new(0),
+            writeback_upload_partial_tail_auto_unknown_ops: AtomicU64::new(0),
             writeback_upload_partial_tail_commit_age_ops: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
@@ -686,6 +714,27 @@ impl FsStats {
                 .load(ORD),
             writeback_upload_partial_tail_auto_ops: self
                 .writeback_upload_partial_tail_auto_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_age_ops: self
+                .writeback_upload_partial_tail_auto_age_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_idle_ops: self
+                .writeback_upload_partial_tail_auto_idle_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_pressure_ops: self
+                .writeback_upload_partial_tail_auto_pressure_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_too_many_ops: self
+                .writeback_upload_partial_tail_auto_too_many_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_buffer_high_ops: self
+                .writeback_upload_partial_tail_auto_buffer_high_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_flush_duration_ops: self
+                .writeback_upload_partial_tail_auto_flush_duration_ops
+                .load(ORD),
+            writeback_upload_partial_tail_auto_unknown_ops: self
+                .writeback_upload_partial_tail_auto_unknown_ops
                 .load(ORD),
             writeback_upload_partial_tail_commit_age_ops: self
                 .writeback_upload_partial_tail_commit_age_ops
@@ -857,6 +906,13 @@ impl FsStats {
         partial_tail_max_unflushed_ops: u64,
         partial_tail_explicit_flush_ops: u64,
         partial_tail_auto_ops: u64,
+        partial_tail_auto_age_ops: u64,
+        partial_tail_auto_idle_ops: u64,
+        partial_tail_auto_pressure_ops: u64,
+        partial_tail_auto_too_many_ops: u64,
+        partial_tail_auto_buffer_high_ops: u64,
+        partial_tail_auto_flush_duration_ops: u64,
+        partial_tail_auto_unknown_ops: u64,
         partial_tail_commit_age_ops: u64,
     ) {
         self.writeback_upload_batch_ops.store(ops, ORD);
@@ -872,6 +928,20 @@ impl FsStats {
             .store(partial_tail_explicit_flush_ops, ORD);
         self.writeback_upload_partial_tail_auto_ops
             .store(partial_tail_auto_ops, ORD);
+        self.writeback_upload_partial_tail_auto_age_ops
+            .store(partial_tail_auto_age_ops, ORD);
+        self.writeback_upload_partial_tail_auto_idle_ops
+            .store(partial_tail_auto_idle_ops, ORD);
+        self.writeback_upload_partial_tail_auto_pressure_ops
+            .store(partial_tail_auto_pressure_ops, ORD);
+        self.writeback_upload_partial_tail_auto_too_many_ops
+            .store(partial_tail_auto_too_many_ops, ORD);
+        self.writeback_upload_partial_tail_auto_buffer_high_ops
+            .store(partial_tail_auto_buffer_high_ops, ORD);
+        self.writeback_upload_partial_tail_auto_flush_duration_ops
+            .store(partial_tail_auto_flush_duration_ops, ORD);
+        self.writeback_upload_partial_tail_auto_unknown_ops
+            .store(partial_tail_auto_unknown_ops, ORD);
         self.writeback_upload_partial_tail_commit_age_ops
             .store(partial_tail_commit_age_ops, ORD);
     }
@@ -1394,6 +1464,34 @@ impl FsStats {
             snapshot.writeback_upload_partial_tail_auto_ops
         ));
         out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_age_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_age_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_idle_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_idle_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_pressure_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_pressure_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_too_many_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_too_many_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_buffer_high_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_buffer_high_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_flush_duration_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_flush_duration_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_partial_tail_auto_unknown_ops_total {}\n",
+            snapshot.writeback_upload_partial_tail_auto_unknown_ops
+        ));
+        out.push_str(&format!(
             "brewfs_writeback_upload_partial_tail_commit_age_ops_total {}\n",
             snapshot.writeback_upload_partial_tail_commit_age_ops
         ));
@@ -1615,7 +1713,9 @@ mod tests {
         stats.sync_writeback_phase_metrics(1, 2, 3, 4, 5, 6, 7);
         stats.sync_writeback_slice_selection_metrics(8, 9, 10, 11);
         stats.sync_writeback_freeze_metrics(12, 1024, 13, 2048, 14, 4096, 15, 8192, 16, 16384);
-        stats.sync_writeback_upload_batch_metrics(17, 32768, 18, 19, 20, 21, 22, 23, 24);
+        stats.sync_writeback_upload_batch_metrics(
+            17, 32768, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        );
 
         let output = stats.render();
         assert!(output.contains("brewfs_fuse_read_ops_total 42"));
@@ -1693,7 +1793,19 @@ mod tests {
             output.contains("brewfs_writeback_upload_partial_tail_explicit_flush_ops_total 22")
         );
         assert!(output.contains("brewfs_writeback_upload_partial_tail_auto_ops_total 23"));
-        assert!(output.contains("brewfs_writeback_upload_partial_tail_commit_age_ops_total 24"));
+        assert!(output.contains("brewfs_writeback_upload_partial_tail_auto_age_ops_total 24"));
+        assert!(output.contains("brewfs_writeback_upload_partial_tail_auto_idle_ops_total 25"));
+        assert!(output.contains("brewfs_writeback_upload_partial_tail_auto_pressure_ops_total 26"));
+        assert!(output.contains("brewfs_writeback_upload_partial_tail_auto_too_many_ops_total 27"));
+        assert!(
+            output.contains("brewfs_writeback_upload_partial_tail_auto_buffer_high_ops_total 28")
+        );
+        assert!(
+            output
+                .contains("brewfs_writeback_upload_partial_tail_auto_flush_duration_ops_total 29")
+        );
+        assert!(output.contains("brewfs_writeback_upload_partial_tail_auto_unknown_ops_total 30"));
+        assert!(output.contains("brewfs_writeback_upload_partial_tail_commit_age_ops_total 31"));
         assert!(output.contains("brewfs_reader_buffer_bytes 8192"));
         assert!(output.contains("brewfs_vfs_create_total_ops_total 0"));
         assert!(output.contains("brewfs_vfs_unlink_lookup_lat_us_total 0"));
@@ -1722,7 +1834,9 @@ mod tests {
         stats.sync_writeback_phase_metrics(111, 222, 333, 444, 555, 666, 777);
         stats.sync_writeback_slice_selection_metrics(888, 999, 1000, 1001);
         stats.sync_writeback_freeze_metrics(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-        stats.sync_writeback_upload_batch_metrics(11, 12, 13, 14, 15, 16, 17, 18, 19);
+        stats.sync_writeback_upload_batch_metrics(
+            11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+        );
         stats.sync_object_store_metrics(2, 8192, 50, 1, 4096, 25, 75, 125, 3);
 
         let snapshot = stats.snapshot();
@@ -1780,7 +1894,20 @@ mod tests {
             17
         );
         assert_eq!(snapshot.writeback_upload_partial_tail_auto_ops, 18);
-        assert_eq!(snapshot.writeback_upload_partial_tail_commit_age_ops, 19);
+        assert_eq!(snapshot.writeback_upload_partial_tail_auto_age_ops, 19);
+        assert_eq!(snapshot.writeback_upload_partial_tail_auto_idle_ops, 20);
+        assert_eq!(snapshot.writeback_upload_partial_tail_auto_pressure_ops, 21);
+        assert_eq!(snapshot.writeback_upload_partial_tail_auto_too_many_ops, 22);
+        assert_eq!(
+            snapshot.writeback_upload_partial_tail_auto_buffer_high_ops,
+            23
+        );
+        assert_eq!(
+            snapshot.writeback_upload_partial_tail_auto_flush_duration_ops,
+            24
+        );
+        assert_eq!(snapshot.writeback_upload_partial_tail_auto_unknown_ops, 25);
+        assert_eq!(snapshot.writeback_upload_partial_tail_commit_age_ops, 26);
     }
 
     #[test]
