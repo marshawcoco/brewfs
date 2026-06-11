@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Mount(args) => mount_cmd(MountConfig::from_sources(*args)?).await,
         Command::Gc(args) => gc_cmd(args).await,
         Command::Info(args) => info_cmd(args).await,
-        Command::Console(_) => anyhow::bail!("console command is not implemented"),
+        Command::Console(args) => console::serve_cmd(args).await,
     };
     shutdown_flame();
     shutdown_chrome();
