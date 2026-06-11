@@ -6,6 +6,7 @@ import {
   Gauge,
   LogIn,
   HardDrive,
+  RefreshCw,
   Settings,
   ShieldCheck,
   Trash2,
@@ -15,12 +16,15 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import {
   ApiError,
   createVolume,
+  fetchJobStatus,
   fetchHealth,
   fetchInstances,
   fetchVolumes,
+  runGcJob,
   type HealthResponse,
   type InstanceInfoResponse,
   type InstanceResponse,
+  type JobStatusResponse,
   type VolumeResponse,
 } from './api';
 import { loadInstanceDetails } from './instanceDetails';
@@ -77,6 +81,11 @@ const emptyVolumeForm: VolumeFormState = {
   meta_url: '',
 };
 
+type CurrentJob = {
+  pid: number;
+  status: JobStatusResponse;
+};
+
 function pageTitle(page: PageKey): string {
   return navItems.find((item) => item.key === page)?.label ?? 'Overview';
 }
@@ -103,6 +112,11 @@ export function App() {
   const [volumeForm, setVolumeForm] = useState<VolumeFormState>(emptyVolumeForm);
   const [creatingVolume, setCreatingVolume] = useState(false);
   const [createVolumeError, setCreateVolumeError] = useState<string | null>(null);
+  const [selectedJobPid, setSelectedJobPid] = useState<number | null>(null);
+  const [gcDryRun, setGcDryRun] = useState(true);
+  const [jobRequestInFlight, setJobRequestInFlight] = useState(false);
+  const [jobError, setJobError] = useState<string | null>(null);
+  const [currentJob, setCurrentJob] = useState<CurrentJob | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -176,6 +190,19 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
+    if (instances.length === 0) {
+      setSelectedJobPid(null);
+      return;
+    }
+
+    setSelectedJobPid((current) =>
+      current !== null && instances.some((instance) => instance.pid === current)
+        ? current
+        : instances[0].pid,
+    );
+  }, [instances]);
+
+  useEffect(() => {
     const handlePopState = () => setPage(pageFromPathname(window.location.pathname));
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -232,6 +259,46 @@ export function App() {
       }
     } finally {
       setCreatingVolume(false);
+    }
+  };
+
+  const submitGcJob = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (selectedJobPid === null) return;
+
+    setJobRequestInFlight(true);
+    setJobError(null);
+    try {
+      const accepted = await runGcJob(selectedJobPid, { dry_run: gcDryRun }, token);
+      const status = await fetchJobStatus(selectedJobPid, accepted.job_id, token);
+      setCurrentJob({ pid: selectedJobPid, status });
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthRequired(true);
+      } else {
+        setJobError(err instanceof Error ? err.message : 'GC job request failed');
+      }
+    } finally {
+      setJobRequestInFlight(false);
+    }
+  };
+
+  const refreshCurrentJob = async () => {
+    if (!currentJob) return;
+
+    setJobRequestInFlight(true);
+    setJobError(null);
+    try {
+      const status = await fetchJobStatus(currentJob.pid, currentJob.status.job_id, token);
+      setCurrentJob({ pid: currentJob.pid, status });
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthRequired(true);
+      } else {
+        setJobError(err instanceof Error ? err.message : 'job status request failed');
+      }
+    } finally {
+      setJobRequestInFlight(false);
     }
   };
 
@@ -294,8 +361,17 @@ export function App() {
               volumeForm,
               creatingVolume,
               createVolumeError,
+              selectedJobPid,
+              gcDryRun,
+              jobRequestInFlight,
+              jobError,
+              currentJob,
               onVolumeFormChange: updateVolumeForm,
               onVolumeSubmit: submitVolume,
+              onSelectedJobPidChange: setSelectedJobPid,
+              onGcDryRunChange: setGcDryRun,
+              onGcJobSubmit: submitGcJob,
+              onRefreshCurrentJob: refreshCurrentJob,
             })
           )}
         </section>
@@ -348,8 +424,17 @@ type RenderContext = {
   volumeForm: VolumeFormState;
   creatingVolume: boolean;
   createVolumeError: string | null;
+  selectedJobPid: number | null;
+  gcDryRun: boolean;
+  jobRequestInFlight: boolean;
+  jobError: string | null;
+  currentJob: CurrentJob | null;
   onVolumeFormChange: (field: keyof VolumeFormState, value: string) => void;
   onVolumeSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSelectedJobPidChange: (pid: number) => void;
+  onGcDryRunChange: (enabled: boolean) => void;
+  onGcJobSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onRefreshCurrentJob: () => void;
 };
 
 function renderPage(page: PageKey, context: RenderContext) {
@@ -364,8 +449,17 @@ function renderPage(page: PageKey, context: RenderContext) {
     volumeForm,
     creatingVolume,
     createVolumeError,
+    selectedJobPid,
+    gcDryRun,
+    jobRequestInFlight,
+    jobError,
+    currentJob,
     onVolumeFormChange,
     onVolumeSubmit,
+    onSelectedJobPidChange,
+    onGcDryRunChange,
+    onGcJobSubmit,
+    onRefreshCurrentJob,
   } = context;
 
   if (page === 'overview') {
@@ -426,9 +520,17 @@ function renderPage(page: PageKey, context: RenderContext) {
 
   if (page === 'jobs') {
     return (
-      <EmptyPanel
-        title="No jobs"
-        detail="Live instance discovery is available; job control-plane actions arrive next."
+      <JobsPage
+        instances={instances}
+        selectedPid={selectedJobPid}
+        dryRun={gcDryRun}
+        requestInFlight={jobRequestInFlight}
+        error={jobError}
+        currentJob={currentJob}
+        onSelectedPidChange={onSelectedJobPidChange}
+        onDryRunChange={onGcDryRunChange}
+        onSubmit={onGcJobSubmit}
+        onRefresh={onRefreshCurrentJob}
       />
     );
   }
@@ -474,6 +576,105 @@ function renderPage(page: PageKey, context: RenderContext) {
       title="Settings unavailable"
       detail="Token auth and registry settings arrive in Phase 1B."
     />
+  );
+}
+
+function JobsPage({
+  instances,
+  selectedPid,
+  dryRun,
+  requestInFlight,
+  error,
+  currentJob,
+  onSelectedPidChange,
+  onDryRunChange,
+  onSubmit,
+  onRefresh,
+}: {
+  instances: InstanceResponse[];
+  selectedPid: number | null;
+  dryRun: boolean;
+  requestInFlight: boolean;
+  error: string | null;
+  currentJob: CurrentJob | null;
+  onSelectedPidChange: (pid: number) => void;
+  onDryRunChange: (enabled: boolean) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onRefresh: () => void;
+}) {
+  if (instances.length === 0) {
+    return <EmptyPanel title="No live instances" detail="GC jobs require a mounted BrewFS instance." />;
+  }
+
+  const gc = currentJob?.status.outcome?.Gc;
+
+  return (
+    <>
+      <article className="panel">
+        <h2>Run GC</h2>
+        <form className="job-form" onSubmit={onSubmit}>
+          <label>
+            <span>Instance</span>
+            <select
+              value={selectedPid ?? ''}
+              onChange={(event) => onSelectedPidChange(Number(event.target.value))}
+            >
+              {instances.map((instance) => (
+                <option key={instance.pid} value={instance.pid}>
+                  {instance.mount_point} · pid {instance.pid}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={dryRun}
+              onChange={(event) => onDryRunChange(event.target.checked)}
+            />
+            <span>Dry run</span>
+          </label>
+          {error ? <p className="error-text">{error}</p> : null}
+          <button className="primary-button" type="submit" disabled={requestInFlight}>
+            <Activity size={16} aria-hidden="true" />
+            <span>{requestInFlight ? 'Working' : 'Start GC'}</span>
+          </button>
+        </form>
+      </article>
+
+      <article className="panel">
+        <h2>Latest job</h2>
+        {currentJob ? (
+          <>
+            <Metric label="Instance" value={`pid ${currentJob.pid}`} />
+            <Metric label="Job ID" value={currentJob.status.job_id} />
+            <Metric label="State" value={currentJob.status.state} />
+            {currentJob.status.detail ? (
+              <p className="muted job-detail">{currentJob.status.detail}</p>
+            ) : null}
+            {gc ? (
+              <div className="job-metrics">
+                <Metric label="Orphan slices" value={String(gc.orphan_slice_count)} />
+                <Metric label="Orphan objects" value={String(gc.orphan_object_count)} />
+                <Metric label="Deleted objects" value={String(gc.deleted_object_count)} />
+                <Metric label="Errors" value={String(gc.error_count)} />
+              </div>
+            ) : null}
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onRefresh}
+              disabled={requestInFlight}
+            >
+              <RefreshCw size={16} aria-hidden="true" />
+              <span>Refresh</span>
+            </button>
+          </>
+        ) : (
+          <p className="muted">No job has been started from this console session.</p>
+        )}
+      </article>
+    </>
   );
 }
 

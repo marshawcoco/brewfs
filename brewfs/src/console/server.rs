@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use std::path::{Path, PathBuf};
 use tower_http::services::ServeDir;
@@ -23,6 +23,8 @@ pub fn build_router(config: ConsoleConfig) -> Router {
         .route("/volumes", get(api::list_volumes).post(api::create_volume))
         .route("/instances", get(api::list_instances))
         .route("/instances/{pid}", get(api::get_instance_info))
+        .route("/instances/{pid}/jobs/gc", post(api::start_gc_job))
+        .route("/instances/{pid}/jobs/{job_id}", get(api::get_job_status))
         .fallback(api_not_found)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -534,6 +536,121 @@ mod tests {
         assert_eq!(value["error"]["code"], "control_plane_error");
     }
 
+    #[tokio::test]
+    async fn instance_gc_job_returns_accepted_job_id() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(dir.path(), AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let _server =
+            crate::control::server::ControlServer::bind(socket_path.clone(), GcJobHandler)
+                .await
+                .unwrap();
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        let app = build_router(config);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/instances/{pid}/jobs/gc"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"dry_run":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["job_id"], "job-gc-1");
+    }
+
+    #[tokio::test]
+    async fn instance_job_status_calls_control_plane_get_job() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(dir.path(), AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let _server =
+            crate::control::server::ControlServer::bind(socket_path.clone(), GcJobHandler)
+                .await
+                .unwrap();
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        let app = build_router(config);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/instances/{pid}/jobs/job-gc-1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["job_id"], "job-gc-1");
+        assert_eq!(value["state"], "Succeeded");
+        assert_eq!(value["outcome"]["Gc"]["dry_run"], true);
+    }
+
+    #[tokio::test]
+    async fn instance_job_status_rejects_control_plane_job_id_mismatch() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let config = test_config(dir.path(), AuthConfig::Disabled);
+        let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
+        let pid = std::process::id();
+        let socket_path = registry.socket_path(pid);
+        let _server =
+            crate::control::server::ControlServer::bind(socket_path.clone(), MismatchedJobHandler)
+                .await
+                .unwrap();
+        let record = crate::control::runtime::InstanceRecord::new(
+            pid,
+            "/mnt/brewfs".to_string(),
+            socket_path,
+            chrono::Utc::now(),
+        );
+        registry.write_record(&record).await.unwrap();
+        let app = build_router(config);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/instances/{pid}/jobs/job-gc-1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "control_plane_error");
+    }
+
     struct GetInfoHandler;
 
     #[async_trait::async_trait]
@@ -585,6 +702,72 @@ mod tests {
                         version: "0.1.0-test".to_string(),
                         meta_backend: "sqlx".to_string(),
                         capabilities: Default::default(),
+                    }
+                }
+                other => crate::control::protocol::ControlResponse::Error {
+                    code: "unexpected".to_string(),
+                    message: format!("unexpected request: {other:?}"),
+                },
+            }
+        }
+    }
+
+    struct GcJobHandler;
+
+    #[async_trait::async_trait]
+    impl crate::control::server::ControlHandler for GcJobHandler {
+        async fn handle(
+            &self,
+            request: crate::control::protocol::ControlRequest,
+        ) -> crate::control::protocol::ControlResponse {
+            match request {
+                crate::control::protocol::ControlRequest::RunGc { dry_run: true } => {
+                    crate::control::protocol::ControlResponse::Accepted {
+                        job_id: "job-gc-1".to_string(),
+                    }
+                }
+                crate::control::protocol::ControlRequest::GetJob { job_id }
+                    if job_id == "job-gc-1" =>
+                {
+                    crate::control::protocol::ControlResponse::JobStatus {
+                        job_id,
+                        state: crate::control::job::JobState::Succeeded,
+                        detail: Some("gc complete".to_string()),
+                        outcome: Some(crate::control::job::JobOutcome::Gc(
+                            crate::control::job::GcJobResult {
+                                dry_run: true,
+                                orphan_slice_count: 3,
+                                orphan_object_count: 2,
+                                deleted_object_count: 0,
+                                error_count: 0,
+                                detail: Some("gc complete".to_string()),
+                            },
+                        )),
+                    }
+                }
+                other => crate::control::protocol::ControlResponse::Error {
+                    code: "unexpected".to_string(),
+                    message: format!("unexpected request: {other:?}"),
+                },
+            }
+        }
+    }
+
+    struct MismatchedJobHandler;
+
+    #[async_trait::async_trait]
+    impl crate::control::server::ControlHandler for MismatchedJobHandler {
+        async fn handle(
+            &self,
+            request: crate::control::protocol::ControlRequest,
+        ) -> crate::control::protocol::ControlResponse {
+            match request {
+                crate::control::protocol::ControlRequest::GetJob { .. } => {
+                    crate::control::protocol::ControlResponse::JobStatus {
+                        job_id: "different-job".to_string(),
+                        state: crate::control::job::JobState::Succeeded,
+                        detail: None,
+                        outcome: None,
                     }
                 }
                 other => crate::control::protocol::ControlResponse::Error {

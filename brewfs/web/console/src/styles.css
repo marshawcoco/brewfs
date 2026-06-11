@@ -281,28 +281,70 @@ h2 {
   opacity: 0.65;
 }
 
-.volume-form {
+.secondary-button {
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #ffffff;
+  color: #17202a;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.volume-form,
+.job-form {
   display: grid;
   gap: 12px;
 }
 
-.volume-form label {
+.volume-form label,
+.job-form label {
   display: grid;
   gap: 5px;
 }
 
-.volume-form span {
+.volume-form span,
+.job-form span {
   color: var(--muted);
   font-size: 13px;
 }
 
-.volume-form input {
+.volume-form input,
+.volume-form select,
+.job-form select {
   min-width: 0;
   height: 38px;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0 10px;
   font: inherit;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.job-detail {
+  margin: 12px 0;
+}
+
+.job-metrics {
+  margin: 8px 0 14px;
 }
 
 @media (max-width: 760px) {
@@ -330,7 +372,8 @@ h2 {
     flex-direction: column;
   }
 
-  .primary-button {
+  .primary-button,
+  .secondary-button {
     justify-content: center;
   }
 }

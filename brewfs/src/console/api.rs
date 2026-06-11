@@ -5,6 +5,7 @@ use super::{
 use crate::{
     control::{
         client::send_request,
+        job::{JobOutcome, JobState},
         protocol::{ControlRequest, ControlResponse},
         runtime::InstanceRecord,
     },
@@ -18,8 +19,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
-use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use std::{path::Path as FsPath, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HealthResponse {
@@ -62,6 +63,24 @@ pub struct InstanceInfoResponse {
     pub version: String,
     pub meta_backend: String,
     pub capabilities: MetaStoreCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RunGcJobRequest {
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AcceptedJobResponse {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct JobStatusResponse {
+    pub job_id: String,
+    pub state: JobState,
+    pub detail: Option<String>,
+    pub outcome: Option<JobOutcome>,
 }
 
 impl From<InstanceRecord> for InstanceResponse {
@@ -142,46 +161,8 @@ pub async fn get_instance_info(
     State(state): State<ConsoleState>,
     Path(requested_pid): Path<u32>,
 ) -> Result<Json<InstanceInfoResponse>, ApiErrorResponse> {
-    let record = state
-        .runtime_registry
-        .list_instances()
-        .await
-        .map_err(|err| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "runtime_registry_error",
-                format!("failed to read runtime registry: {err}"),
-            )
-        })?
-        .into_iter()
-        .find(|record| record.pid == requested_pid)
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "runtime instance not found",
-            )
-        })?;
-
-    let response = tokio::time::timeout(
-        Duration::from_secs(2),
-        send_request(&record.socket_path, &ControlRequest::GetInfo),
-    )
-    .await
-    .map_err(|_| {
-        json_error(
-            StatusCode::BAD_GATEWAY,
-            "control_plane_error",
-            "control-plane request timed out",
-        )
-    })?
-    .map_err(|err| {
-        json_error(
-            StatusCode::BAD_GATEWAY,
-            "control_plane_error",
-            format!("control-plane request failed: {err}"),
-        )
-    })?;
+    let response =
+        send_instance_control_request(&state, requested_pid, &ControlRequest::GetInfo).await?;
 
     match response {
         ControlResponse::Info {
@@ -219,6 +200,143 @@ pub async fn get_instance_info(
             format!("unexpected control-plane response: {other:?}"),
         )),
     }
+}
+
+pub async fn start_gc_job(
+    State(state): State<ConsoleState>,
+    Path(pid): Path<u32>,
+    Json(request): Json<RunGcJobRequest>,
+) -> Result<(StatusCode, Json<AcceptedJobResponse>), ApiErrorResponse> {
+    let response = send_instance_control_request(
+        &state,
+        pid,
+        &ControlRequest::RunGc {
+            dry_run: request.dry_run,
+        },
+    )
+    .await?;
+
+    match response {
+        ControlResponse::Accepted { job_id } => {
+            Ok((StatusCode::ACCEPTED, Json(AcceptedJobResponse { job_id })))
+        }
+        ControlResponse::Error { code, message } => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            "control_plane_error",
+            format!("{code}: {message}"),
+        )),
+        other => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            "control_plane_error",
+            format!("unexpected control-plane response: {other:?}"),
+        )),
+    }
+}
+
+pub async fn get_job_status(
+    State(state): State<ConsoleState>,
+    Path((pid, requested_job_id)): Path<(u32, String)>,
+) -> Result<Json<JobStatusResponse>, ApiErrorResponse> {
+    let response = send_instance_control_request(
+        &state,
+        pid,
+        &ControlRequest::GetJob {
+            job_id: requested_job_id.clone(),
+        },
+    )
+    .await?;
+
+    match response {
+        ControlResponse::JobStatus {
+            job_id,
+            state,
+            detail,
+            outcome,
+        } => {
+            if job_id != requested_job_id {
+                return Err(json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "control_plane_error",
+                    format!(
+                        "control-plane job id mismatch: requested {requested_job_id}, got {job_id}"
+                    ),
+                ));
+            }
+            Ok(Json(JobStatusResponse {
+                job_id,
+                state,
+                detail,
+                outcome,
+            }))
+        }
+        ControlResponse::Error { code, message } => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            "control_plane_error",
+            format!("{code}: {message}"),
+        )),
+        other => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            "control_plane_error",
+            format!("unexpected control-plane response: {other:?}"),
+        )),
+    }
+}
+
+async fn send_instance_control_request(
+    state: &ConsoleState,
+    pid: u32,
+    request: &ControlRequest,
+) -> Result<ControlResponse, ApiErrorResponse> {
+    let record = find_runtime_record(state, pid).await?;
+    send_control_request(&record.socket_path, request).await
+}
+
+async fn find_runtime_record(
+    state: &ConsoleState,
+    pid: u32,
+) -> Result<InstanceRecord, ApiErrorResponse> {
+    state
+        .runtime_registry
+        .list_instances()
+        .await
+        .map_err(|err| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime_registry_error",
+                format!("failed to read runtime registry: {err}"),
+            )
+        })?
+        .into_iter()
+        .find(|record| record.pid == pid)
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "runtime instance not found",
+            )
+        })
+}
+
+async fn send_control_request(
+    socket_path: &FsPath,
+    request: &ControlRequest,
+) -> Result<ControlResponse, ApiErrorResponse> {
+    tokio::time::timeout(Duration::from_secs(2), send_request(socket_path, request))
+        .await
+        .map_err(|_| {
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                "control_plane_error",
+                "control-plane request timed out",
+            )
+        })?
+        .map_err(|err| {
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                "control_plane_error",
+                format!("control-plane request failed: {err}"),
+            )
+        })
 }
 
 pub fn json_error(

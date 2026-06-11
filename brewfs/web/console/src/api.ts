@@ -51,6 +51,36 @@ export interface InstanceInfoResponse {
   capabilities: Record<string, boolean>;
 }
 
+export interface RunGcJobRequest {
+  dry_run: boolean;
+}
+
+export interface AcceptedJobResponse {
+  job_id: string;
+}
+
+export type JobState = 'Pending' | 'Running' | 'Succeeded' | 'Failed';
+
+export interface GcJobResult {
+  dry_run: boolean;
+  orphan_slice_count: number;
+  orphan_object_count: number;
+  deleted_object_count: number;
+  error_count: number;
+  detail: string | null;
+}
+
+export interface JobOutcome {
+  Gc?: GcJobResult;
+}
+
+export interface JobStatusResponse {
+  job_id: string;
+  state: JobState;
+  detail: string | null;
+  outcome: JobOutcome | null;
+}
+
 export interface ListInstancesResponse {
   instances: InstanceResponse[];
 }
@@ -121,6 +151,36 @@ export async function fetchInstanceInfo(
   assertOk(response, 'instance info request failed');
 
   return (await response.json()) as InstanceInfoResponse;
+}
+
+export async function runGcJob(
+  pid: number,
+  request: RunGcJobRequest,
+  token?: string | null,
+): Promise<AcceptedJobResponse> {
+  const response = await fetch(`/api/instances/${pid}/jobs/gc`, {
+    method: 'POST',
+    headers: apiHeaders(token, true),
+    body: JSON.stringify(request),
+  });
+
+  assertOk(response, 'start GC job request failed');
+
+  return (await response.json()) as AcceptedJobResponse;
+}
+
+export async function fetchJobStatus(
+  pid: number,
+  jobId: string,
+  token?: string | null,
+): Promise<JobStatusResponse> {
+  const response = await fetch(`/api/instances/${pid}/jobs/${encodeURIComponent(jobId)}`, {
+    headers: apiHeaders(token),
+  });
+
+  assertOk(response, 'job status request failed');
+
+  return (await response.json()) as JobStatusResponse;
 }
 
 export async function createVolume(

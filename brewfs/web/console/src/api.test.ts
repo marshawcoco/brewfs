@@ -5,7 +5,9 @@ import {
   fetchHealth,
   fetchInstanceInfo,
   fetchInstances,
+  fetchJobStatus,
   fetchVolumes,
+  runGcJob,
 } from './api';
 
 const healthResponse = {
@@ -235,5 +237,64 @@ describe('runtime instances API', () => {
     });
     expect(result.meta_backend).toBe('sqlx');
     expect(result.capabilities.namespace).toBe(true);
+  });
+
+  it('starts a GC job with JSON and bearer token', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ job_id: 'job-gc-1' }), {
+        status: 202,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const result = await runGcJob(42, { dry_run: true }, 'secret-token');
+
+    expect(fetch).toHaveBeenCalledWith('/api/instances/42/jobs/gc', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ dry_run: true }),
+    });
+    expect(result.job_id).toBe('job-gc-1');
+  });
+
+  it('fetches a runtime job status with a bearer token', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          job_id: 'job-gc-1',
+          state: 'Succeeded',
+          detail: 'gc complete',
+          outcome: {
+            Gc: {
+              dry_run: true,
+              orphan_slice_count: 3,
+              orphan_object_count: 2,
+              deleted_object_count: 0,
+              error_count: 0,
+              detail: 'gc complete',
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      ),
+    );
+
+    const result = await fetchJobStatus(42, 'job-gc-1', 'secret-token');
+
+    expect(fetch).toHaveBeenCalledWith('/api/instances/42/jobs/job-gc-1', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+    expect(result.state).toBe('Succeeded');
+    expect(result.outcome?.Gc?.orphan_slice_count).toBe(3);
   });
 });
