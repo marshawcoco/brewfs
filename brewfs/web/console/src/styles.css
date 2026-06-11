@@ -347,6 +347,10 @@ h2 {
   margin: 8px 0 14px;
 }
 
+.feature-message {
+  margin: 14px 0 0;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: 1fr;

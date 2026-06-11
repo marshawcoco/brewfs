@@ -27,6 +27,7 @@ import {
   type JobStatusResponse,
   type VolumeResponse,
 } from './api';
+import { loadFeatureStatus, type FeatureKey, type FeatureStatus } from './featureStatus';
 import { loadInstanceDetails } from './instanceDetails';
 
 type PageKey =
@@ -86,6 +87,11 @@ type CurrentJob = {
   status: JobStatusResponse;
 };
 
+type FeatureResult = {
+  feature: FeatureKey;
+  status: FeatureStatus;
+};
+
 function pageTitle(page: PageKey): string {
   return navItems.find((item) => item.key === page)?.label ?? 'Overview';
 }
@@ -96,6 +102,13 @@ function pageFromPathname(pathname: string): PageKey {
     (Object.entries(pagePaths).find(([, path]) => path === normalized)?.[0] as PageKey | undefined) ??
     'overview'
   );
+}
+
+function featureForPage(page: PageKey): FeatureKey | null {
+  if (page === 'browser' || page === 'trash' || page === 'acl' || page === 'csi') {
+    return page;
+  }
+  return null;
 }
 
 export function App() {
@@ -117,6 +130,9 @@ export function App() {
   const [jobRequestInFlight, setJobRequestInFlight] = useState(false);
   const [jobError, setJobError] = useState<string | null>(null);
   const [currentJob, setCurrentJob] = useState<CurrentJob | null>(null);
+  const [featureResult, setFeatureResult] = useState<FeatureResult | null>(null);
+  const [featureLoading, setFeatureLoading] = useState(false);
+  const [featureError, setFeatureError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -207,6 +223,38 @@ export function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  useEffect(() => {
+    const feature = featureForPage(page);
+    if (!feature) return;
+    let cancelled = false;
+
+    setFeatureLoading(true);
+    setFeatureError(null);
+    void loadFeatureStatus(feature, volumes, token)
+      .then((status) => {
+        if (!cancelled) {
+          setFeatureResult({ feature, status });
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) {
+          setAuthRequired(true);
+        } else {
+          setFeatureError(err instanceof Error ? err.message : 'feature request failed');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFeatureLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [page, token, volumes]);
 
   const navigate = (nextPage: PageKey) => {
     setPage(nextPage);
@@ -366,6 +414,9 @@ export function App() {
               jobRequestInFlight,
               jobError,
               currentJob,
+              featureResult,
+              featureLoading,
+              featureError,
               onVolumeFormChange: updateVolumeForm,
               onVolumeSubmit: submitVolume,
               onSelectedJobPidChange: setSelectedJobPid,
@@ -429,6 +480,9 @@ type RenderContext = {
   jobRequestInFlight: boolean;
   jobError: string | null;
   currentJob: CurrentJob | null;
+  featureResult: FeatureResult | null;
+  featureLoading: boolean;
+  featureError: string | null;
   onVolumeFormChange: (field: keyof VolumeFormState, value: string) => void;
   onVolumeSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSelectedJobPidChange: (pid: number) => void;
@@ -454,6 +508,9 @@ function renderPage(page: PageKey, context: RenderContext) {
     jobRequestInFlight,
     jobError,
     currentJob,
+    featureResult,
+    featureLoading,
+    featureError,
     onVolumeFormChange,
     onVolumeSubmit,
     onSelectedJobPidChange,
@@ -537,36 +594,48 @@ function renderPage(page: PageKey, context: RenderContext) {
 
   if (page === 'browser') {
     return (
-      <EmptyPanel
-        title="File browser unavailable"
-        detail="Namespace browsing depends on mounted instance discovery and file metadata APIs."
+      <FeatureStatusPanel
+        feature="browser"
+        fallbackTitle="File browser"
+        result={featureResult}
+        loading={featureLoading}
+        error={featureError}
       />
     );
   }
 
   if (page === 'trash') {
     return (
-      <EmptyPanel
-        title="Trash unavailable"
-        detail="Trash listing and restore actions depend on delayed-delete metadata APIs."
+      <FeatureStatusPanel
+        feature="trash"
+        fallbackTitle="Trash"
+        result={featureResult}
+        loading={featureLoading}
+        error={featureError}
       />
     );
   }
 
   if (page === 'acl') {
     return (
-      <EmptyPanel
-        title="ACL unavailable"
-        detail="ACL editing will be enabled only for backends that advertise ACL support."
+      <FeatureStatusPanel
+        feature="acl"
+        fallbackTitle="ACL"
+        result={featureResult}
+        loading={featureLoading}
+        error={featureError}
       />
     );
   }
 
   if (page === 'csi') {
     return (
-      <EmptyPanel
-        title="CSI dashboard disabled"
-        detail="Kubernetes resource discovery is a subsequent read-only integration."
+      <FeatureStatusPanel
+        feature="csi"
+        fallbackTitle="CSI"
+        result={featureResult}
+        loading={featureLoading}
+        error={featureError}
       />
     );
   }
@@ -576,6 +645,37 @@ function renderPage(page: PageKey, context: RenderContext) {
       title="Settings unavailable"
       detail="Token auth and registry settings arrive in Phase 1B."
     />
+  );
+}
+
+function FeatureStatusPanel({
+  feature,
+  fallbackTitle,
+  result,
+  loading,
+  error,
+}: {
+  feature: FeatureKey;
+  fallbackTitle: string;
+  result: FeatureResult | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const status = result?.feature === feature ? result.status : null;
+
+  return (
+    <article className="panel empty-panel">
+      <h2>{status?.title ?? fallbackTitle}</h2>
+      {loading && !status ? <p className="muted">Loading status.</p> : null}
+      {error ? <p className="error-text">{error}</p> : null}
+      {status ? (
+        <>
+          <Metric label="State" value={status.state} />
+          {status.volumeName ? <Metric label="Filesystem" value={status.volumeName} /> : null}
+          <p className="muted feature-message">{status.message}</p>
+        </>
+      ) : null}
+    </article>
   );
 }
 
