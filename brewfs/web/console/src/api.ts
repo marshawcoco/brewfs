@@ -143,6 +143,12 @@ export interface CreateVolumeRequest {
   };
 }
 
+export interface UpdateVolumeRequest {
+  name?: string;
+  description?: string | null;
+  labels?: Record<string, string>;
+}
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -171,6 +177,44 @@ export async function fetchVolumes(token?: string | null): Promise<ListVolumesRe
   assertOk(response, 'volumes request failed');
 
   return (await response.json()) as ListVolumesResponse;
+}
+
+export async function fetchVolume(
+  volumeId: string,
+  token?: string | null,
+): Promise<VolumeResponse> {
+  const response = await fetch(`/api/volumes/${encodeURIComponent(volumeId)}`, {
+    headers: apiHeaders(token),
+  });
+
+  assertOk(response, 'volume request failed');
+
+  return (await response.json()) as VolumeResponse;
+}
+
+export async function updateVolume(
+  volumeId: string,
+  request: UpdateVolumeRequest,
+  token?: string | null,
+): Promise<VolumeResponse> {
+  const response = await fetch(`/api/volumes/${encodeURIComponent(volumeId)}`, {
+    method: 'PATCH',
+    headers: apiHeaders(token, true),
+    body: JSON.stringify(request),
+  });
+
+  assertOk(response, 'volume update request failed');
+
+  return (await response.json()) as VolumeResponse;
+}
+
+export async function deleteVolume(volumeId: string, token?: string | null): Promise<void> {
+  const response = await fetch(`/api/volumes/${encodeURIComponent(volumeId)}`, {
+    method: 'DELETE',
+    headers: apiHeaders(token),
+  });
+
+  assertOk(response, 'volume delete request failed');
 }
 
 export async function fetchInstances(token?: string | null): Promise<ListInstancesResponse> {

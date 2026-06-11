@@ -3,6 +3,7 @@ import {
   ApiError,
   createVolume,
   deleteAcl,
+  deleteVolume,
   deleteTrashEntry,
   fetchAcl,
   fetchCsiSummary,
@@ -12,10 +13,12 @@ import {
   fetchInstances,
   fetchJobStatus,
   fetchTrash,
+  fetchVolume,
   fetchVolumes,
   putAcl,
   restoreTrashEntry,
   runGcJob,
+  updateVolume,
 } from './api';
 
 const healthResponse = {
@@ -174,6 +177,91 @@ describe('volume registry API', () => {
       }),
     });
     expect(JSON.stringify(result)).not.toContain('secret');
+  });
+
+  it('gets updates and deletes a volume with bearer token', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    fetch
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: 'vol-1',
+            name: 'dev-local',
+            description: null,
+            labels: {},
+            created_at: '2026-06-11T00:00:00Z',
+            updated_at: '2026-06-11T00:00:00Z',
+            mount_config: {
+              mount_point: null,
+              data_backend: 'local-fs',
+              data_dir: null,
+              meta_backend: 'sqlx',
+              meta_url_redacted: null,
+              chunk_size: null,
+              block_size: null,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: 'vol-1',
+            name: 'prod-local',
+            description: null,
+            labels: { env: 'prod' },
+            created_at: '2026-06-11T00:00:00Z',
+            updated_at: '2026-06-11T00:00:01Z',
+            mount_config: {
+              mount_point: null,
+              data_backend: 'local-fs',
+              data_dir: null,
+              meta_backend: 'sqlx',
+              meta_url_redacted: null,
+              chunk_size: null,
+              block_size: null,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await expect(fetchVolume('vol-1', 'secret-token')).resolves.toMatchObject({
+      name: 'dev-local',
+    });
+    await expect(
+      updateVolume('vol-1', { name: 'prod-local', description: null, labels: { env: 'prod' } }, 'secret-token'),
+    ).resolves.toMatchObject({ name: 'prod-local' });
+    await expect(deleteVolume('vol-1', 'secret-token')).resolves.toBeUndefined();
+
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/volumes/vol-1', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/volumes/vol-1', {
+      method: 'PATCH',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'prod-local',
+        description: null,
+        labels: { env: 'prod' },
+      }),
+    });
+    expect(fetch).toHaveBeenNthCalledWith(3, '/api/volumes/vol-1', {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret-token',
+      },
+    });
   });
 });
 

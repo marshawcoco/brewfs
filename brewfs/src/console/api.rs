@@ -1,6 +1,6 @@
 use super::{
     AuthMode, ConsoleState,
-    registry::{CreateVolumeRequest, RegistryError, VolumeResponse},
+    registry::{CreateVolumeRequest, RegistryError, UpdateVolumeRequest, VolumeResponse},
 };
 use crate::{
     control::{
@@ -140,6 +140,43 @@ pub async fn create_volume(
         .await
         .map_err(ApiErrorResponse::from)?;
     Ok((StatusCode::CREATED, Json(volume)))
+}
+
+pub async fn get_volume(
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
+) -> Result<Json<VolumeResponse>, ApiErrorResponse> {
+    let volume = state
+        .registry
+        .get(&volume_id)
+        .await
+        .map_err(ApiErrorResponse::from)?;
+    Ok(Json(volume))
+}
+
+pub async fn update_volume(
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
+    Json(request): Json<UpdateVolumeRequest>,
+) -> Result<Json<VolumeResponse>, ApiErrorResponse> {
+    let volume = state
+        .registry
+        .update(&volume_id, request)
+        .await
+        .map_err(ApiErrorResponse::from)?;
+    Ok(Json(volume))
+}
+
+pub async fn delete_volume(
+    State(state): State<ConsoleState>,
+    Path(volume_id): Path<String>,
+) -> Result<StatusCode, ApiErrorResponse> {
+    state
+        .registry
+        .delete(&volume_id)
+        .await
+        .map_err(ApiErrorResponse::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn list_instances(
@@ -445,6 +482,7 @@ impl From<RegistryError> for ApiErrorResponse {
     fn from(err: RegistryError) -> Self {
         let status = match err.code() {
             "invalid_config" => StatusCode::BAD_REQUEST,
+            "not_found" => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self {

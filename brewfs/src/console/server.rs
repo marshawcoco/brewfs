@@ -21,6 +21,12 @@ pub fn build_router(config: ConsoleConfig) -> Router {
     let api = Router::new()
         .route("/health", get(api::health))
         .route("/volumes", get(api::list_volumes).post(api::create_volume))
+        .route(
+            "/volumes/{volume_id}",
+            get(api::get_volume)
+                .patch(api::update_volume)
+                .delete(api::delete_volume),
+        )
         .route("/volumes/{volume_id}/files", get(api::list_files))
         .route("/volumes/{volume_id}/trash", get(api::list_trash))
         .route(
@@ -419,6 +425,96 @@ mod tests {
         let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(listed["volumes"][0]["id"], created["id"]);
         assert!(!String::from_utf8_lossy(&body).contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn volumes_api_gets_updates_and_deletes_registry_entries() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
+        let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
+
+        let create_body = serde_json::json!({
+            "name": "dev-local",
+            "mount_config": {
+                "data_backend": "local-fs",
+                "meta_backend": "sqlx"
+            }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/volumes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let volume_id = created["id"].as_str().unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let patch_body = serde_json::json!({
+            "name": "prod-local",
+            "description": null,
+            "labels": { "env": "prod" }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/volumes/{volume_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(patch_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(updated["name"], "prod-local");
+        assert_eq!(updated["labels"]["env"], "prod");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/volumes/{volume_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/volumes/{volume_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -57,6 +57,62 @@ impl VolumeRegistry {
         Ok(response)
     }
 
+    pub async fn get(&self, volume_id: &str) -> Result<VolumeResponse, RegistryError> {
+        let _guard = self.lock.lock().await;
+        let file = self.load_unlocked().await?;
+        file.volumes
+            .iter()
+            .find(|volume| volume.id == volume_id)
+            .map(StoredVolume::to_response)
+            .ok_or_else(|| RegistryError::not_found(format!("volume not found: {volume_id}")))
+    }
+
+    pub async fn update(
+        &self,
+        volume_id: &str,
+        request: UpdateVolumeRequest,
+    ) -> Result<VolumeResponse, RegistryError> {
+        request.validate()?;
+        let _guard = self.lock.lock().await;
+        let mut file = self.load_unlocked().await?;
+        let response = {
+            let volume = file
+                .volumes
+                .iter_mut()
+                .find(|volume| volume.id == volume_id)
+                .ok_or_else(|| {
+                    RegistryError::not_found(format!("volume not found: {volume_id}"))
+                })?;
+
+            if let Some(name) = request.name {
+                volume.name = name.trim().to_owned();
+            }
+            if let Some(description) = request.description {
+                volume.description = description.and_then(non_empty_trimmed);
+            }
+            if let Some(labels) = request.labels {
+                volume.labels = labels;
+            }
+            volume.updated_at = Utc::now();
+            volume.to_response()
+        };
+        self.store_unlocked(&file).await?;
+        Ok(response)
+    }
+
+    pub async fn delete(&self, volume_id: &str) -> Result<(), RegistryError> {
+        let _guard = self.lock.lock().await;
+        let mut file = self.load_unlocked().await?;
+        let original_len = file.volumes.len();
+        file.volumes.retain(|volume| volume.id != volume_id);
+        if file.volumes.len() == original_len {
+            return Err(RegistryError::not_found(format!(
+                "volume not found: {volume_id}"
+            )));
+        }
+        self.store_unlocked(&file).await
+    }
+
     async fn load_unlocked(&self) -> Result<VolumeRegistryFile, RegistryError> {
         match tokio::fs::read(self.path.as_ref()).await {
             Ok(data) => serde_json::from_slice(&data)
@@ -149,6 +205,31 @@ pub struct CreateVolumeMountConfig {
     pub chunk_size: Option<u64>,
     #[serde(default)]
     pub block_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateVolumeRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<Option<String>>,
+    #[serde(default)]
+    pub labels: Option<BTreeMap<String, String>>,
+}
+
+impl UpdateVolumeRequest {
+    fn validate(&self) -> Result<(), RegistryError> {
+        if self
+            .name
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return Err(RegistryError::invalid_config(
+                "volume name must not be empty",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -256,6 +337,13 @@ impl RegistryError {
             message: message.into(),
         }
     }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "not_found",
+            message: message.into(),
+        }
+    }
 }
 
 fn non_empty_trimmed(value: String) -> Option<String> {
@@ -341,5 +429,37 @@ mod tests {
         let err = registry.create(request).await.unwrap_err();
 
         assert_eq!(err.code(), "invalid_config");
+    }
+
+    #[tokio::test]
+    async fn update_and_delete_manage_existing_volume_metadata() {
+        let dir = tempdir().unwrap();
+        let registry = VolumeRegistry::new(dir.path().to_path_buf());
+        let created = registry.create(create_request()).await.unwrap();
+
+        let updated = registry
+            .update(
+                &created.id,
+                UpdateVolumeRequest {
+                    name: Some("prod-local".into()),
+                    description: Some(None),
+                    labels: Some(BTreeMap::from([("env".into(), "prod".into())])),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.name, "prod-local");
+        assert_eq!(updated.description, None);
+        assert_eq!(updated.labels.get("env").map(String::as_str), Some("prod"));
+        assert!(updated.updated_at >= created.updated_at);
+
+        let fetched = registry.get(&created.id).await.unwrap();
+        assert_eq!(fetched.name, "prod-local");
+
+        registry.delete(&created.id).await.unwrap();
+        let err = registry.get(&created.id).await.unwrap_err();
+        assert_eq!(err.code(), "not_found");
     }
 }
