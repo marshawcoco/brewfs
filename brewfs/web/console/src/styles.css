@@ -367,28 +367,6 @@ h2 {
   font-size: 13px;
 }
 
-.acl-editor {
-  display: grid;
-  gap: 12px;
-  margin-top: 16px;
-}
-
-.acl-editor label {
-  display: grid;
-  gap: 6px;
-}
-
-.acl-editor textarea {
-  width: 100%;
-  min-height: 180px;
-  min-width: 0;
-  resize: vertical;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
-  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
 .browser-toolbar {
   display: grid;
   grid-template-columns: minmax(180px, 260px) minmax(280px, 1fr) auto;

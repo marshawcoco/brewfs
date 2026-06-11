@@ -35,6 +35,7 @@ import {
   putAcl,
   restoreTrashEntry,
   runGcJob,
+  type AclUpdateRequest,
   type FileListResponse,
   type FileStatResponse,
   type HealthResponse,
@@ -565,7 +566,7 @@ export function App() {
     event.preventDefault();
     if (!selectedAclVolume) return;
 
-    let request;
+    let request: AclUpdateRequest;
     try {
       request = parseAclDraft(aclDraft);
       setAclDraftError(null);
