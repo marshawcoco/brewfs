@@ -877,6 +877,9 @@ fn csi_adapter_error(err: CsiAdapterError) -> ApiErrorResponse {
 fn trash_adapter_error(err: TrashAdapterError) -> ApiErrorResponse {
     match err {
         TrashAdapterError::Unsupported(message) => unsupported(message),
+        TrashAdapterError::ControlPlane(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "control_plane_error", message)
+        }
     }
 }
 

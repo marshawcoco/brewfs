@@ -1515,6 +1515,12 @@ impl<T: MetaStore + ?Sized + 'static> ControlHandler for Arc<MetaClient<T>> {
                 code: "unsupported".to_string(),
                 message: "ACL control-plane requests are not implemented yet".to_string(),
             },
+            ControlRequest::ListTrash
+            | ControlRequest::RestoreTrashEntry { .. }
+            | ControlRequest::DeleteTrashEntry { .. } => ControlResponse::Error {
+                code: "unsupported".to_string(),
+                message: "trash control-plane requests are not implemented yet".to_string(),
+            },
         }
     }
 }

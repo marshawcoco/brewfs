@@ -30,6 +30,13 @@ pub enum ControlRequest {
     DeleteAcl {
         path: String,
     },
+    ListTrash,
+    RestoreTrashEntry {
+        entry_id: String,
+    },
+    DeleteTrashEntry {
+        entry_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -71,6 +78,15 @@ pub enum ControlResponse {
     AclDeleted {
         path: String,
     },
+    Trash {
+        entries: Vec<ControlTrashEntry>,
+    },
+    TrashRestored {
+        entry_id: String,
+    },
+    TrashDeleted {
+        entry_id: String,
+    },
     Error {
         code: String,
         message: String,
@@ -106,6 +122,14 @@ pub struct ControlAclEntry {
     pub tag: String,
     pub id: Option<u32>,
     pub perm: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ControlTrashEntry {
+    pub id: String,
+    pub original_path: String,
+    pub size: Option<u64>,
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

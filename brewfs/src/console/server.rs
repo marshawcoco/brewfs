@@ -959,6 +959,12 @@ mod tests {
         let registry = crate::control::runtime::RuntimeRegistry::new(config.runtime_dir.clone());
         let pid = std::process::id();
         let socket_path = registry.socket_path(pid);
+        let _server = crate::control::server::ControlServer::bind(
+            socket_path.clone(),
+            UnsupportedTrashHandler,
+        )
+        .await
+        .unwrap();
         let record = crate::control::runtime::InstanceRecord::new(
             pid,
             "/mnt/brewfs".to_string(),
@@ -1391,6 +1397,31 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         created["id"].as_str().unwrap().to_string()
+    }
+
+    struct UnsupportedTrashHandler;
+
+    #[async_trait::async_trait]
+    impl crate::control::server::ControlHandler for UnsupportedTrashHandler {
+        async fn handle(
+            &self,
+            request: crate::control::protocol::ControlRequest,
+        ) -> crate::control::protocol::ControlResponse {
+            match request {
+                crate::control::protocol::ControlRequest::ListTrash
+                | crate::control::protocol::ControlRequest::RestoreTrashEntry { .. }
+                | crate::control::protocol::ControlRequest::DeleteTrashEntry { .. } => {
+                    crate::control::protocol::ControlResponse::Error {
+                        code: "unsupported".to_string(),
+                        message: "trash control-plane requests are not implemented yet".to_string(),
+                    }
+                }
+                other => crate::control::protocol::ControlResponse::Error {
+                    code: "unexpected".to_string(),
+                    message: format!("unexpected request: {other:?}"),
+                },
+            }
+        }
     }
 
     struct GetInfoHandler;

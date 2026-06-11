@@ -1,5 +1,5 @@
 use super::job::{GcJobResult, JobManager, JobOutcome, JobState};
-use super::protocol::{ControlAclEntry, ControlRequest, ControlResponse};
+use super::protocol::{ControlAclEntry, ControlRequest, ControlResponse, ControlTrashEntry};
 use super::runtime::{InstanceRecord, RuntimeRegistry};
 use super::server::{ControlHandler, ControlServer};
 use async_trait::async_trait;
@@ -134,6 +134,61 @@ fn protocol_roundtrip_preserves_acl_requests_and_responses() {
     let raw = serde_json::to_vec(&deleted).expect("serialize acl delete response");
     let decoded: ControlResponse =
         serde_json::from_slice(&raw).expect("deserialize acl delete response");
+    assert_eq!(decoded, deleted);
+}
+
+#[test]
+fn protocol_roundtrip_preserves_trash_requests_and_responses() {
+    let entry = ControlTrashEntry {
+        id: "trash-1".to_string(),
+        original_path: "/docs/report.txt".to_string(),
+        size: Some(42),
+        deleted_at: Some("2026-06-11T12:00:00Z".to_string()),
+    };
+    let list_req = ControlRequest::ListTrash;
+    let raw = serde_json::to_vec(&list_req).expect("serialize list trash request");
+    let decoded: ControlRequest =
+        serde_json::from_slice(&raw).expect("deserialize list trash request");
+    assert_eq!(decoded, list_req);
+
+    let restore_req = ControlRequest::RestoreTrashEntry {
+        entry_id: "trash-1".to_string(),
+    };
+    let raw = serde_json::to_vec(&restore_req).expect("serialize restore trash request");
+    let decoded: ControlRequest =
+        serde_json::from_slice(&raw).expect("deserialize restore trash request");
+    assert_eq!(decoded, restore_req);
+
+    let delete_req = ControlRequest::DeleteTrashEntry {
+        entry_id: "trash-1".to_string(),
+    };
+    let raw = serde_json::to_vec(&delete_req).expect("serialize delete trash request");
+    let decoded: ControlRequest =
+        serde_json::from_slice(&raw).expect("deserialize delete trash request");
+    assert_eq!(decoded, delete_req);
+
+    let response = ControlResponse::Trash {
+        entries: vec![entry],
+    };
+    let raw = serde_json::to_vec(&response).expect("serialize trash response");
+    let decoded: ControlResponse =
+        serde_json::from_slice(&raw).expect("deserialize trash response");
+    assert_eq!(decoded, response);
+
+    let restored = ControlResponse::TrashRestored {
+        entry_id: "trash-1".to_string(),
+    };
+    let raw = serde_json::to_vec(&restored).expect("serialize trash restore response");
+    let decoded: ControlResponse =
+        serde_json::from_slice(&raw).expect("deserialize trash restore response");
+    assert_eq!(decoded, restored);
+
+    let deleted = ControlResponse::TrashDeleted {
+        entry_id: "trash-1".to_string(),
+    };
+    let raw = serde_json::to_vec(&deleted).expect("serialize trash delete response");
+    let decoded: ControlResponse =
+        serde_json::from_slice(&raw).expect("deserialize trash delete response");
     assert_eq!(decoded, deleted);
 }
 
