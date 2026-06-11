@@ -608,3 +608,93 @@ Prefer a narrower direct0-only batching strategy:
   keep direct1 throughput regression under 5%;
   keep direct0 post-drained PUT/GiB below Candidate D.
 ```
+
+## Rejected Candidate F: Short Idle Grace for Cached Sub-Block Slices
+
+Hypothesis:
+
+- Candidate E was too broad because it disabled cached sub-block idle freezing until
+  explicit flush/pressure/flush-duration paths.
+- A small fixed idle grace could preserve most direct1 behavior while giving direct0
+  kernel writeback-cache fragments one extra merge window.
+
+Implementation tested:
+
+- Added a 2s cached sub-block idle grace before `AutoFreezeTrigger::Idle`.
+- Added a unit test proving cached sub-block slices are not auto-idle frozen at
+  the normal 1s idle threshold, but are eventually frozen by the grace timeout.
+
+Verification before perf:
+
+```text
+cargo test -p brewfs --lib \
+  vfs::io::writer::tests::test_auto_flush_gives_cached_sub_block_idle_short_grace
+  # red before implementation, green after implementation
+
+cargo test -p brewfs --lib 'vfs::io::writer::tests::'  # 32 passed
+cargo clippy -p brewfs --lib -- -D warnings
+```
+
+Direct0 artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781208163-13440
+```
+
+Direct0 result versus Candidate D (`perf-run-1781205242-516`):
+
+```text
+tool_wall_s=81 vs 83 (-2.4%)
+read_bw_mib_s=232.9 vs 219.0 (+6.4%)
+write_bw_mib_s=106.5 vs 99.3 (+7.3%)
+post_write_drain_s=6 vs 6
+post-drained put_ops_per_gib_written=1710.4 vs 1928.8 (-11.3%)
+s3_put_ops=10797 vs 11226 (-3.8%)
+avg_upload_batch_mib=0.588 vs 0.525 (+12.0%)
+partial_tail_ratio=0.932 vs 0.955
+partial_tail_auto_idle=5378 vs 8313 (-35.3%)
+partial_tail_auto_too_many=2661 vs 553
+writeback_hard_wait_ms=17.99M vs 16.19M (+11.1%)
+```
+
+Direct1 guard artifact:
+
+```text
+brewfs/docker/compose-xfstests/artifacts/perf-run-1781208555-7614
+```
+
+Direct1 guard versus Candidate D (`perf-run-1781205600-16115`):
+
+```text
+tool_wall_s=66 vs 62 (+6.5%)
+read_bw_mib_s=188.5 vs 232.7 (-19.0%)
+write_bw_mib_s=85.9 vs 106.2 (-19.1%)
+active_plus_drain_s=83.0 vs 82.1 (+1.1%)
+post_write_drain_s=18 vs 22
+post-drained put_ops_per_gib_written=258.7 vs 259.0 (-0.1%)
+avg_upload_batch_mib=4.072 vs 4.046 (+0.7%)
+partial_tail_ratio=0.027 vs 0.030
+writeback_hard_wait_ms=221.6k vs 193.2k (+14.7%)
+write_p99_ms=6140 vs 4328 (+41.9%)
+```
+
+Decision:
+
+- Reject and roll back Candidate F.
+- Direct0 gains are real, especially on PUT/GiB and small-tail attribution, but
+  the fixed grace increases direct1 latency enough to cut read/write throughput
+  by about 19%.
+- The next attempt should avoid fixed time grace and instead introduce an explicit
+  write-origin/active-writeback signal. Current `creation_unique != 0` only means
+  the slice was initially created by the cached path; it is not a reliable direct0
+  versus direct1 signal once subsequent writes, flushes, and pressure interact.
+
+Next target:
+
+```text
+Candidate G: add explicit writer-origin instrumentation before changing policy.
+  track whether a slice has cached-writeback writes versus normal writes;
+  expose counters for cached/direct/unknown sub-block auto-freeze attribution;
+  use the signal to design an active-writeback-only idle deferral;
+  preserve Candidate D as the performance baseline until the new signal proves useful.
+```
