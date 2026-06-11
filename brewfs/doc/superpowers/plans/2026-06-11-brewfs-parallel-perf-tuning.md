@@ -541,6 +541,60 @@ Decision: keep as diagnostics if code review stays clean.
 
 Reason: this confirms the first-stage barrier cannot safely sit on the current per-batch `persist_slice` model. The current pipeline stages each upload batch using the same `DirtySliceKey { ino, chunk_id, local_seq: slice_id }`, so multiple batches for one slice share the same local `.slice`, `.tmp`, and `.meta` paths. The nonzero stage failure count is therefore a real reliability signal, not just perf noise. It also shows hundreds of metadata commits before local staging completes, which explains why a naive stage-before-commit barrier badly regressed `direct=1`: it adds a new foreground dependency to a path that currently publishes metadata before staging catches up.
 
+### Attempt 9: Unique Staged Batch Keys
+
+Candidate: add a `stage_seq` dimension to `DirtySliceKey`, write each pipelined staged batch to a distinct `.slice/.meta/.tmp` path, track all staged keys in `SliceState`, and clean those keys after metadata commit plus upload drain. The candidate also corrected the dirty record offset from slice-relative to chunk-relative for recovery/overlay semantics.
+Branch: `codex/perf-tune-integration`
+Touched files: `brewfs/src/vfs/cache/keys.rs`, `brewfs/src/vfs/cache/write_back.rs`, `brewfs/src/vfs/io/writer.rs`
+Perf artifact candidate: `brewfs/docker/compose-xfstests/artifacts/perf-run-1781193104-15857`
+
+Validation:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs persist_slice_keeps_staged_batches_for_one_remote_slice_distinct --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs test_slice_tracks_multiple_writeback_stage_keys_for_cleanup --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs vfs::cache::write_back --lib
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo test -p brewfs vfs::io::writer --lib
+cargo fmt
+git diff --check
+cargo fmt --check
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/mnt/slayerfs/brewfs/target cargo clippy -p brewfs --lib -- -D warnings
+```
+
+Perf smoke command:
+
+```bash
+PERF_FIO_DIRECT_MATRIX="0 1" \
+PERF_FIO_RANDRW_RUNTIME=10 \
+PERF_FIO_POST_WRITE_DRAIN=true \
+PERF_FIO_PREFILL_DRAIN_TIMEOUT_SECS=600 \
+BREWFS_COMPRESSION=none \
+BREWFS_PREFETCH_ENABLED=true \
+BREWFS_UPLOAD_CONCURRENCY=32 \
+CARGO_PROFILE_RELEASE_DEBUG=0 \
+bash brewfs/docker/compose-xfstests/run_redis_perf.sh \
+  --writeback-throughput-profile \
+  --tools "fio-randrw"
+```
+
+Smoke comparison against Attempt 8:
+
+| Tool | Metric | Attempt 8 | Attempt 9 | Delta |
+| --- | --- | ---: | ---: | ---: |
+| `fio-randrw-direct0` | active wall | 18s | 11s | -38.9% |
+| `fio-randrw-direct0` | post-write drain | 16s | 14s | -12.5% |
+| `fio-randrw-direct0` | write BW | 276.2 MiB/s | 248.9 MiB/s | -9.9% |
+| `fio-randrw-direct0` | stage failures | 1 | 14 | +1300.0% |
+| `fio-randrw-direct0-post-write-drained` | PUT ops | 1693 | 1266 | -25.2% |
+| `fio-randrw-direct1` | active wall | 31s | 39s | +25.8% |
+| `fio-randrw-direct1` | post-write drain | 53s | 46s | -13.2% |
+| `fio-randrw-direct1` | write BW | 110.8 MiB/s | 86.3 MiB/s | -22.1% |
+| `fio-randrw-direct1` | hard wait ops | 357 | 577 | +61.6% |
+
+Decision: reject and revert the code candidate.
+
+Reason: unique staged batch paths improved some drain/object-count symptoms, but it made the reliability metric worse (`stage_failures_total` rose from 1 to 14 during the direct0 phase) and regressed the `direct=1` active path by more than the acceptable gate. The new failures appear during the buffered direct0 phase and then carry forward into cumulative stats; this points at a remaining staging/cleanup race rather than a safe foundation for a commit-before-stage barrier. The next candidate should not expand per-batch local records in the foreground pipeline. Prefer either a single durable slice-level stage record written once after sealing, or a feature-gated staged uploader queue where stage ownership and cleanup are centralized outside the upload subtask.
+
 ## Next Target: Staged Upload And Object Count
 
 - Treat `fio-randrw-direct0` object amplification as the primary write-path bottleneck: baseline already shows thousands of PUT ops/GiB written and sub-1MiB average PUT object size.
