@@ -51,6 +51,11 @@ describe('loadTrashView', () => {
     const result = await loadTrashView(volume, 'secret-token');
 
     expect(result.state).toBe('ready');
+    expect(result.actions).toEqual({
+      restoreSupported: true,
+      deleteSupported: false,
+      deleteDisabledReason: 'Permanent delete requires block-store-aware GC and is not wired yet.',
+    });
     expect(result.entries).toEqual([
       {
         id: 'trash-1',

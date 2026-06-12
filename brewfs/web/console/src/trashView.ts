@@ -9,13 +9,26 @@ export interface TrashEntryRow {
   deletedAt: string;
 }
 
+export interface TrashActions {
+  restoreSupported: boolean;
+  deleteSupported: boolean;
+  deleteDisabledReason: string | null;
+}
+
 export interface TrashViewResult {
   state: TrashViewState;
   title: string;
   message: string;
   volumeName?: string;
   entries: TrashEntryRow[];
+  actions: TrashActions;
 }
+
+export const DEFAULT_TRASH_ACTIONS: TrashActions = {
+  restoreSupported: true,
+  deleteSupported: false,
+  deleteDisabledReason: 'Permanent delete requires block-store-aware GC and is not wired yet.',
+};
 
 export async function loadTrashView(
   volume: VolumeResponse | null,
@@ -27,6 +40,7 @@ export async function loadTrashView(
       title: 'No registered filesystems',
       message: 'Register a filesystem before using the trash view.',
       entries: [],
+      actions: disabledTrashActions(),
     };
   }
 
@@ -39,6 +53,7 @@ export async function loadTrashView(
       message: entries.length === 0 ? 'Trash is empty.' : `${entries.length} trash entries found.`,
       volumeName: volume.name,
       entries,
+      actions: DEFAULT_TRASH_ACTIONS,
     };
   } catch (err: unknown) {
     return trashErrorOrThrow(volume, err);
@@ -73,6 +88,7 @@ function trashErrorOrThrow(volume: VolumeResponse, err: unknown): TrashViewResul
       message: 'The filesystem is registered but is not mounted or runtime access is unavailable.',
       volumeName: volume.name,
       entries: [],
+      actions: disabledTrashActions(),
     };
   }
   if (err instanceof ApiError && err.status === 501) {
@@ -82,9 +98,18 @@ function trashErrorOrThrow(volume: VolumeResponse, err: unknown): TrashViewResul
       message: 'The server exposes trash endpoints but BrewFS trash support is not implemented yet.',
       volumeName: volume.name,
       entries: [],
+      actions: disabledTrashActions(),
     };
   }
   throw err;
+}
+
+function disabledTrashActions(): TrashActions {
+  return {
+    restoreSupported: false,
+    deleteSupported: false,
+    deleteDisabledReason: 'Trash actions are unavailable for this filesystem.',
+  };
 }
 
 function stringField(record: Record<string, unknown>, keys: string[]): string | null {

@@ -1424,7 +1424,7 @@ function TrashPage({
                           <button
                             className="secondary-button compact-button"
                             type="button"
-                            disabled={Boolean(actionInFlight)}
+                            disabled={Boolean(actionInFlight) || !result.actions.restoreSupported}
                             onClick={() => onRestore(entry.id)}
                           >
                             <RotateCcw size={14} aria-hidden="true" />
@@ -1435,7 +1435,8 @@ function TrashPage({
                           <button
                             className="danger-button compact-button"
                             type="button"
-                            disabled={Boolean(actionInFlight)}
+                            disabled={Boolean(actionInFlight) || !result.actions.deleteSupported}
+                            title={result.actions.deleteDisabledReason ?? undefined}
                             onClick={() => onDelete(entry.id)}
                           >
                             <Trash2 size={14} aria-hidden="true" />
