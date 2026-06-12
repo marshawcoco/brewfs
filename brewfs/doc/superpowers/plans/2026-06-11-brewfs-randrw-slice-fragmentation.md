@@ -1166,3 +1166,85 @@ commit_before_stage_ops toward zero. Focus on coalescing cached-only dirty
 sub-blocks before upload dispatch and avoid turning metadata ordering into a
 source of extra partial-tail slices.
 ```
+
+## 2026-06-12 Candidate L Follow-up Results
+
+Attempted code changes:
+
+- A slice-level staging gate in `commit_chunk` and `try_commit`, requiring
+  `writeback_fully_persisted()` before commit-before-upload metadata writes.
+- A frozen-slice full local stage before upload dispatch, with per-batch
+  staging skipped when already covered.
+- A wait-order tweak so staged frozen slices could try early metadata commit
+  before waiting on the upload notification.
+- An isolated `FsWriteBackCache::persist_slice` offset-base fix, so dirty slice
+  files use the first staged chunk offset as local file offset zero.
+
+Rejected artifacts:
+
+```text
+slice-level full stage + strict metadata gate:
+  artifact: perf-run-1781223330-26580
+  direct0 commit_before_stage_ops 2585 -> 0
+  direct0 read/write +40.9%/+37.7%
+  rejected: tool_wall_s 80 -> 170 and post-drained PUT/GiB +21.7%
+
+same gate + early metadata wait-order tweak:
+  artifact: perf-run-1781223838-20862
+  direct0 commit_before_stage_ops 2585 -> 0
+  direct0 read/write +25.3%/+22.8%
+  rejected: tool_wall_s 80 -> 380, wall_active_tail_s +1459.7%, and
+  post-write drain left hundreds of MiB dirty until the run was manually
+  stopped.
+
+writeback offset-base fix only:
+  direct0 artifact: perf-run-1781224706-3379
+  direct1 artifact: perf-run-1781225038-15662
+  direct1 repeat artifact: perf-run-1781225360-14510
+  direct0 read/write +7.2%/+6.8%, tool_wall_s 80 -> 72, and
+  post-drained PUT/GiB -22.6%
+  rejected: direct0 post_write_drain_s 2 -> 23, and repeated direct1 guards
+  regressed read/write by about 6-7% with tool_wall_s +6.6-9.8%.
+```
+
+Decision:
+
+- Roll back all Candidate L code changes.
+- Keep only the already accepted writeback batch merge commit as the current
+  reliability precondition.
+- Do not attempt another metadata gate without finer-grained observability.
+
+Findings:
+
+- Driving `commit_before_stage_ops` to zero is not enough. The strict gate can
+  improve in-window fio throughput while hiding cost in close/flush tail,
+  post-write drain, or direct1 throughput.
+- Full local staging before upload dispatch is unsafe for still-writable slices
+  because cached writes can still alter bytes before upload dispatch freezes
+  the corresponding blocks. Frozen-only full staging avoids that correctness
+  hole but does not solve the close/drain cost.
+- The current commit loop is sensitive to notification ordering: stage-ready,
+  upload-done, and metadata ordering are coupled through the same slice notify
+  path. Optimizing one edge can starve another.
+- `persist_slice` offset-base semantics are a real recovery-path correctness
+  issue, but the isolated hot-path performance result was mixed and failed the
+  direct1 guard. Revisit it only with a narrower recovery-only path or with
+  same-time direct1 control evidence.
+
+Next target:
+
+```text
+Candidate M: add observability before behavior.
+  Add per-slice counters/timers for:
+    - stage-ready-before-upload-done
+    - metadata-waiting-for-stage
+    - metadata-waiting-for-upload
+    - metadata-waiting-for-front-slice
+    - close/flush wait split by stage/upload/metadata/recent-pending
+  Run direct0/direct1 randrw against Candidate J with no behavior change.
+  Accept the instrumentation only if direct0/direct1 read/write stay within 2%
+  and post-drain does not regress materially.
+  Use the new attribution to design the next barrier so metadata can wait on
+  durable local stage without increasing partial-tail object count or close
+  tail.
+```
