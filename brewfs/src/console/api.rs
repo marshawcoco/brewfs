@@ -756,7 +756,7 @@ async fn find_optional_runtime_record_for_volume(
         Err(err) => return Err(ApiErrorResponse::from(err)),
     };
     let mount_point = volume.mount_config.mount_point.ok_or_else(|| {
-        unavailable("registered volume has no mount point; mount it before using runtime-backed console features")
+        instance_unavailable("registered volume has no mount point; mount it before using runtime-backed console features")
     })?;
 
     let record = state
@@ -773,7 +773,7 @@ async fn find_optional_runtime_record_for_volume(
         .into_iter()
         .find(|record| record.mount_point == mount_point)
         .ok_or_else(|| {
-            unavailable(format!(
+            instance_unavailable(format!(
                 "registered volume is not mounted at {mount_point}; mount it before using runtime-backed console features"
             ))
         })?;
@@ -858,6 +858,10 @@ fn unsupported(message: impl Into<String>) -> ApiErrorResponse {
 
 fn unavailable(message: impl Into<String>) -> ApiErrorResponse {
     json_error(StatusCode::CONFLICT, "unavailable", message)
+}
+
+fn instance_unavailable(message: impl Into<String>) -> ApiErrorResponse {
+    json_error(StatusCode::CONFLICT, "instance_unavailable", message)
 }
 
 fn ensure_csi_dashboard_enabled(state: &ConsoleState) -> Result<(), ApiErrorResponse> {

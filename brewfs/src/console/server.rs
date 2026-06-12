@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trash_api_returns_unavailable_when_registered_volume_is_not_mounted() {
+    async fn trash_api_returns_instance_unavailable_when_registered_volume_is_not_mounted() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
         let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["error"]["code"], "unavailable");
+        assert_eq!(value["error"]["code"], "instance_unavailable");
     }
 
     #[tokio::test]
@@ -1144,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acl_api_returns_unavailable_when_registered_volume_is_not_mounted() {
+    async fn acl_api_returns_instance_unavailable_when_registered_volume_is_not_mounted() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
         let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
@@ -1163,7 +1163,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["error"]["code"], "unavailable");
+        assert_eq!(value["error"]["code"], "instance_unavailable");
     }
 
     #[tokio::test]
@@ -1308,7 +1308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn files_api_returns_unavailable_when_registered_volume_is_not_mounted() {
+    async fn files_api_returns_instance_unavailable_when_registered_volume_is_not_mounted() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "<div id=\"root\"></div>").unwrap();
         let app = build_router(test_config(dir.path(), AuthConfig::Disabled));
@@ -1351,7 +1351,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["error"]["code"], "unavailable");
+        assert_eq!(value["error"]["code"], "instance_unavailable");
     }
 
     #[tokio::test]
