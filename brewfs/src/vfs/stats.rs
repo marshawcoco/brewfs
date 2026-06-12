@@ -101,6 +101,26 @@ pub struct FsStatsSnapshot {
     pub writeback_commit_before_stage_ops: u64,
     pub writeback_commit_wait_upload_ops: u64,
     pub writeback_commit_wait_upload_us: u64,
+    pub writeback_commit_wait_upload_size_ops: u64,
+    pub writeback_commit_wait_upload_size_us: u64,
+    pub writeback_commit_wait_upload_max_unflushed_ops: u64,
+    pub writeback_commit_wait_upload_max_unflushed_us: u64,
+    pub writeback_commit_wait_upload_explicit_flush_ops: u64,
+    pub writeback_commit_wait_upload_explicit_flush_us: u64,
+    pub writeback_commit_wait_upload_auto_ops: u64,
+    pub writeback_commit_wait_upload_auto_us: u64,
+    pub writeback_commit_wait_upload_commit_age_ops: u64,
+    pub writeback_commit_wait_upload_commit_age_us: u64,
+    pub writeback_commit_wait_upload_unknown_reason_ops: u64,
+    pub writeback_commit_wait_upload_unknown_reason_us: u64,
+    pub writeback_commit_wait_upload_normal_only_ops: u64,
+    pub writeback_commit_wait_upload_normal_only_us: u64,
+    pub writeback_commit_wait_upload_cached_only_ops: u64,
+    pub writeback_commit_wait_upload_cached_only_us: u64,
+    pub writeback_commit_wait_upload_mixed_origin_ops: u64,
+    pub writeback_commit_wait_upload_mixed_origin_us: u64,
+    pub writeback_commit_wait_upload_unknown_origin_ops: u64,
+    pub writeback_commit_wait_upload_unknown_origin_us: u64,
     pub writeback_commit_wait_retry_ops: u64,
     pub writeback_commit_wait_retry_us: u64,
     pub writeback_slice_create_ops: u64,
@@ -120,6 +140,8 @@ pub struct FsStatsSnapshot {
     pub writeback_upload_batch_ops: u64,
     pub writeback_upload_batch_bytes: u64,
     pub writeback_upload_batch_blocks: u64,
+    pub writeback_upload_batch_single_block_ops: u64,
+    pub writeback_upload_batch_multi_block_ops: u64,
     pub writeback_upload_partial_tail_ops: u64,
     pub writeback_upload_partial_tail_size_ops: u64,
     pub writeback_upload_partial_tail_max_unflushed_ops: u64,
@@ -390,6 +412,36 @@ pub struct FsStats {
     pub writeback_commit_wait_upload_ops: AtomicU64,
     /// Total commit-loop upload wait duration in microseconds.
     pub writeback_commit_wait_upload_us: AtomicU64,
+    /// Commit-loop upload waits for size/chunk-end frozen slices.
+    pub writeback_commit_wait_upload_size_ops: AtomicU64,
+    pub writeback_commit_wait_upload_size_us: AtomicU64,
+    /// Commit-loop upload waits for max-unflushed frozen slices.
+    pub writeback_commit_wait_upload_max_unflushed_ops: AtomicU64,
+    pub writeback_commit_wait_upload_max_unflushed_us: AtomicU64,
+    /// Commit-loop upload waits for explicit flush frozen slices.
+    pub writeback_commit_wait_upload_explicit_flush_ops: AtomicU64,
+    pub writeback_commit_wait_upload_explicit_flush_us: AtomicU64,
+    /// Commit-loop upload waits for auto-frozen slices.
+    pub writeback_commit_wait_upload_auto_ops: AtomicU64,
+    pub writeback_commit_wait_upload_auto_us: AtomicU64,
+    /// Commit-loop upload waits for commit-age safety frozen slices.
+    pub writeback_commit_wait_upload_commit_age_ops: AtomicU64,
+    pub writeback_commit_wait_upload_commit_age_us: AtomicU64,
+    /// Commit-loop upload waits without freeze reason attribution.
+    pub writeback_commit_wait_upload_unknown_reason_ops: AtomicU64,
+    pub writeback_commit_wait_upload_unknown_reason_us: AtomicU64,
+    /// Commit-loop upload waits for ordinary-write-only slices.
+    pub writeback_commit_wait_upload_normal_only_ops: AtomicU64,
+    pub writeback_commit_wait_upload_normal_only_us: AtomicU64,
+    /// Commit-loop upload waits for cached-writeback-only slices.
+    pub writeback_commit_wait_upload_cached_only_ops: AtomicU64,
+    pub writeback_commit_wait_upload_cached_only_us: AtomicU64,
+    /// Commit-loop upload waits for mixed-origin slices.
+    pub writeback_commit_wait_upload_mixed_origin_ops: AtomicU64,
+    pub writeback_commit_wait_upload_mixed_origin_us: AtomicU64,
+    /// Commit-loop upload waits for slices without origin attribution.
+    pub writeback_commit_wait_upload_unknown_origin_ops: AtomicU64,
+    pub writeback_commit_wait_upload_unknown_origin_us: AtomicU64,
     /// Commit-loop retry backoff sleeps after commit conditions are not met.
     pub writeback_commit_wait_retry_ops: AtomicU64,
     /// Total commit-loop retry backoff duration in microseconds.
@@ -428,6 +480,10 @@ pub struct FsStats {
     pub writeback_upload_batch_bytes: AtomicU64,
     /// Blocks included in writer upload batches.
     pub writeback_upload_batch_blocks: AtomicU64,
+    /// Upload batches with zero or one block.
+    pub writeback_upload_batch_single_block_ops: AtomicU64,
+    /// Upload batches with more than one block.
+    pub writeback_upload_batch_multi_block_ops: AtomicU64,
     /// Upload batches that included a frozen partial tail block.
     pub writeback_upload_partial_tail_ops: AtomicU64,
     /// Partial-tail upload batches from size/chunk-end freezes.
@@ -604,6 +660,26 @@ impl FsStats {
             writeback_commit_before_stage_ops: AtomicU64::new(0),
             writeback_commit_wait_upload_ops: AtomicU64::new(0),
             writeback_commit_wait_upload_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_size_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_size_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_max_unflushed_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_max_unflushed_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_explicit_flush_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_explicit_flush_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_auto_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_auto_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_commit_age_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_commit_age_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_unknown_reason_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_unknown_reason_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_normal_only_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_normal_only_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_cached_only_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_cached_only_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_mixed_origin_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_mixed_origin_us: AtomicU64::new(0),
+            writeback_commit_wait_upload_unknown_origin_ops: AtomicU64::new(0),
+            writeback_commit_wait_upload_unknown_origin_us: AtomicU64::new(0),
             writeback_commit_wait_retry_ops: AtomicU64::new(0),
             writeback_commit_wait_retry_us: AtomicU64::new(0),
             writeback_slice_create_ops: AtomicU64::new(0),
@@ -623,6 +699,8 @@ impl FsStats {
             writeback_upload_batch_ops: AtomicU64::new(0),
             writeback_upload_batch_bytes: AtomicU64::new(0),
             writeback_upload_batch_blocks: AtomicU64::new(0),
+            writeback_upload_batch_single_block_ops: AtomicU64::new(0),
+            writeback_upload_batch_multi_block_ops: AtomicU64::new(0),
             writeback_upload_partial_tail_ops: AtomicU64::new(0),
             writeback_upload_partial_tail_size_ops: AtomicU64::new(0),
             writeback_upload_partial_tail_max_unflushed_ops: AtomicU64::new(0),
@@ -769,6 +847,66 @@ impl FsStats {
             writeback_commit_before_stage_ops: self.writeback_commit_before_stage_ops.load(ORD),
             writeback_commit_wait_upload_ops: self.writeback_commit_wait_upload_ops.load(ORD),
             writeback_commit_wait_upload_us: self.writeback_commit_wait_upload_us.load(ORD),
+            writeback_commit_wait_upload_size_ops: self
+                .writeback_commit_wait_upload_size_ops
+                .load(ORD),
+            writeback_commit_wait_upload_size_us: self
+                .writeback_commit_wait_upload_size_us
+                .load(ORD),
+            writeback_commit_wait_upload_max_unflushed_ops: self
+                .writeback_commit_wait_upload_max_unflushed_ops
+                .load(ORD),
+            writeback_commit_wait_upload_max_unflushed_us: self
+                .writeback_commit_wait_upload_max_unflushed_us
+                .load(ORD),
+            writeback_commit_wait_upload_explicit_flush_ops: self
+                .writeback_commit_wait_upload_explicit_flush_ops
+                .load(ORD),
+            writeback_commit_wait_upload_explicit_flush_us: self
+                .writeback_commit_wait_upload_explicit_flush_us
+                .load(ORD),
+            writeback_commit_wait_upload_auto_ops: self
+                .writeback_commit_wait_upload_auto_ops
+                .load(ORD),
+            writeback_commit_wait_upload_auto_us: self
+                .writeback_commit_wait_upload_auto_us
+                .load(ORD),
+            writeback_commit_wait_upload_commit_age_ops: self
+                .writeback_commit_wait_upload_commit_age_ops
+                .load(ORD),
+            writeback_commit_wait_upload_commit_age_us: self
+                .writeback_commit_wait_upload_commit_age_us
+                .load(ORD),
+            writeback_commit_wait_upload_unknown_reason_ops: self
+                .writeback_commit_wait_upload_unknown_reason_ops
+                .load(ORD),
+            writeback_commit_wait_upload_unknown_reason_us: self
+                .writeback_commit_wait_upload_unknown_reason_us
+                .load(ORD),
+            writeback_commit_wait_upload_normal_only_ops: self
+                .writeback_commit_wait_upload_normal_only_ops
+                .load(ORD),
+            writeback_commit_wait_upload_normal_only_us: self
+                .writeback_commit_wait_upload_normal_only_us
+                .load(ORD),
+            writeback_commit_wait_upload_cached_only_ops: self
+                .writeback_commit_wait_upload_cached_only_ops
+                .load(ORD),
+            writeback_commit_wait_upload_cached_only_us: self
+                .writeback_commit_wait_upload_cached_only_us
+                .load(ORD),
+            writeback_commit_wait_upload_mixed_origin_ops: self
+                .writeback_commit_wait_upload_mixed_origin_ops
+                .load(ORD),
+            writeback_commit_wait_upload_mixed_origin_us: self
+                .writeback_commit_wait_upload_mixed_origin_us
+                .load(ORD),
+            writeback_commit_wait_upload_unknown_origin_ops: self
+                .writeback_commit_wait_upload_unknown_origin_ops
+                .load(ORD),
+            writeback_commit_wait_upload_unknown_origin_us: self
+                .writeback_commit_wait_upload_unknown_origin_us
+                .load(ORD),
             writeback_commit_wait_retry_ops: self.writeback_commit_wait_retry_ops.load(ORD),
             writeback_commit_wait_retry_us: self.writeback_commit_wait_retry_us.load(ORD),
             writeback_slice_create_ops: self.writeback_slice_create_ops.load(ORD),
@@ -796,6 +934,12 @@ impl FsStats {
             writeback_upload_batch_ops: self.writeback_upload_batch_ops.load(ORD),
             writeback_upload_batch_bytes: self.writeback_upload_batch_bytes.load(ORD),
             writeback_upload_batch_blocks: self.writeback_upload_batch_blocks.load(ORD),
+            writeback_upload_batch_single_block_ops: self
+                .writeback_upload_batch_single_block_ops
+                .load(ORD),
+            writeback_upload_batch_multi_block_ops: self
+                .writeback_upload_batch_multi_block_ops
+                .load(ORD),
             writeback_upload_partial_tail_ops: self.writeback_upload_partial_tail_ops.load(ORD),
             writeback_upload_partial_tail_size_ops: self
                 .writeback_upload_partial_tail_size_ops
@@ -1009,6 +1153,72 @@ impl FsStats {
         self.writeback_commit_wait_retry_us.store(retry_us, ORD);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_writeback_commit_wait_breakdown_metrics(
+        &self,
+        size_ops: u64,
+        size_us: u64,
+        max_unflushed_ops: u64,
+        max_unflushed_us: u64,
+        explicit_flush_ops: u64,
+        explicit_flush_us: u64,
+        auto_ops: u64,
+        auto_us: u64,
+        commit_age_ops: u64,
+        commit_age_us: u64,
+        unknown_reason_ops: u64,
+        unknown_reason_us: u64,
+        normal_only_ops: u64,
+        normal_only_us: u64,
+        cached_only_ops: u64,
+        cached_only_us: u64,
+        mixed_origin_ops: u64,
+        mixed_origin_us: u64,
+        unknown_origin_ops: u64,
+        unknown_origin_us: u64,
+    ) {
+        self.writeback_commit_wait_upload_size_ops
+            .store(size_ops, ORD);
+        self.writeback_commit_wait_upload_size_us
+            .store(size_us, ORD);
+        self.writeback_commit_wait_upload_max_unflushed_ops
+            .store(max_unflushed_ops, ORD);
+        self.writeback_commit_wait_upload_max_unflushed_us
+            .store(max_unflushed_us, ORD);
+        self.writeback_commit_wait_upload_explicit_flush_ops
+            .store(explicit_flush_ops, ORD);
+        self.writeback_commit_wait_upload_explicit_flush_us
+            .store(explicit_flush_us, ORD);
+        self.writeback_commit_wait_upload_auto_ops
+            .store(auto_ops, ORD);
+        self.writeback_commit_wait_upload_auto_us
+            .store(auto_us, ORD);
+        self.writeback_commit_wait_upload_commit_age_ops
+            .store(commit_age_ops, ORD);
+        self.writeback_commit_wait_upload_commit_age_us
+            .store(commit_age_us, ORD);
+        self.writeback_commit_wait_upload_unknown_reason_ops
+            .store(unknown_reason_ops, ORD);
+        self.writeback_commit_wait_upload_unknown_reason_us
+            .store(unknown_reason_us, ORD);
+        self.writeback_commit_wait_upload_normal_only_ops
+            .store(normal_only_ops, ORD);
+        self.writeback_commit_wait_upload_normal_only_us
+            .store(normal_only_us, ORD);
+        self.writeback_commit_wait_upload_cached_only_ops
+            .store(cached_only_ops, ORD);
+        self.writeback_commit_wait_upload_cached_only_us
+            .store(cached_only_us, ORD);
+        self.writeback_commit_wait_upload_mixed_origin_ops
+            .store(mixed_origin_ops, ORD);
+        self.writeback_commit_wait_upload_mixed_origin_us
+            .store(mixed_origin_us, ORD);
+        self.writeback_commit_wait_upload_unknown_origin_ops
+            .store(unknown_origin_ops, ORD);
+        self.writeback_commit_wait_upload_unknown_origin_us
+            .store(unknown_origin_us, ORD);
+    }
+
     pub fn sync_writeback_slice_selection_metrics(
         &self,
         create_ops: u64,
@@ -1105,6 +1315,17 @@ impl FsStats {
             .store(partial_tail_auto_unknown_ops, ORD);
         self.writeback_upload_partial_tail_commit_age_ops
             .store(partial_tail_commit_age_ops, ORD);
+    }
+
+    pub fn sync_writeback_upload_batch_shape_metrics(
+        &self,
+        single_block_ops: u64,
+        multi_block_ops: u64,
+    ) {
+        self.writeback_upload_batch_single_block_ops
+            .store(single_block_ops, ORD);
+        self.writeback_upload_batch_multi_block_ops
+            .store(multi_block_ops, ORD);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1607,6 +1828,86 @@ impl FsStats {
             snapshot.writeback_commit_wait_upload_us
         ));
         out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_size_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_size_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_size_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_size_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_max_unflushed_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_max_unflushed_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_max_unflushed_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_max_unflushed_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_explicit_flush_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_explicit_flush_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_explicit_flush_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_explicit_flush_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_auto_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_auto_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_auto_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_auto_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_commit_age_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_commit_age_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_commit_age_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_commit_age_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_unknown_reason_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_unknown_reason_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_unknown_reason_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_unknown_reason_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_normal_only_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_normal_only_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_normal_only_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_normal_only_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_cached_only_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_cached_only_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_cached_only_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_cached_only_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_mixed_origin_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_mixed_origin_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_mixed_origin_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_mixed_origin_us
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_unknown_origin_ops_total {}\n",
+            snapshot.writeback_commit_wait_upload_unknown_origin_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_commit_wait_upload_unknown_origin_us_total {}\n",
+            snapshot.writeback_commit_wait_upload_unknown_origin_us
+        ));
+        out.push_str(&format!(
             "brewfs_writeback_commit_wait_retry_ops_total {}\n",
             snapshot.writeback_commit_wait_retry_ops
         ));
@@ -1681,6 +1982,14 @@ impl FsStats {
         out.push_str(&format!(
             "brewfs_writeback_upload_batch_blocks_total {}\n",
             snapshot.writeback_upload_batch_blocks
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_batch_single_block_ops_total {}\n",
+            snapshot.writeback_upload_batch_single_block_ops
+        ));
+        out.push_str(&format!(
+            "brewfs_writeback_upload_batch_multi_block_ops_total {}\n",
+            snapshot.writeback_upload_batch_multi_block_ops
         ));
         out.push_str(&format!(
             "brewfs_writeback_upload_partial_tail_ops_total {}\n",
@@ -1984,11 +2293,15 @@ mod tests {
         stats.add_writeback_backpressure_hard_wait(Duration::from_micros(34));
         stats.sync_writeback_phase_metrics(1, 2, 3, 4, 5, 6, 7);
         stats.sync_writeback_commit_wait_metrics(40, 41, 42, 43);
+        stats.sync_writeback_commit_wait_breakdown_metrics(
+            44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+        );
         stats.sync_writeback_slice_selection_metrics(8, 9, 10, 11);
         stats.sync_writeback_freeze_metrics(12, 1024, 13, 2048, 14, 4096, 15, 8192, 16, 16384);
         stats.sync_writeback_upload_batch_metrics(
             17, 32768, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
         );
+        stats.sync_writeback_upload_batch_shape_metrics(64, 65);
         stats.sync_writeback_upload_origin_metrics(32, 33, 34, 35, 36, 37, 38, 39);
 
         let output = stats.render();
@@ -2053,6 +2366,26 @@ mod tests {
         assert!(output.contains("brewfs_writeback_commit_before_stage_ops_total 7"));
         assert!(output.contains("brewfs_writeback_commit_wait_upload_ops_total 40"));
         assert!(output.contains("brewfs_writeback_commit_wait_upload_us_total 41"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_size_ops_total 44"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_size_us_total 45"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_max_unflushed_ops_total 46"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_max_unflushed_us_total 47"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_explicit_flush_ops_total 48"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_explicit_flush_us_total 49"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_auto_ops_total 50"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_auto_us_total 51"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_commit_age_ops_total 52"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_commit_age_us_total 53"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_unknown_reason_ops_total 54"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_unknown_reason_us_total 55"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_normal_only_ops_total 56"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_normal_only_us_total 57"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_cached_only_ops_total 58"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_cached_only_us_total 59"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_mixed_origin_ops_total 60"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_mixed_origin_us_total 61"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_unknown_origin_ops_total 62"));
+        assert!(output.contains("brewfs_writeback_commit_wait_upload_unknown_origin_us_total 63"));
         assert!(output.contains("brewfs_writeback_commit_wait_retry_ops_total 42"));
         assert!(output.contains("brewfs_writeback_commit_wait_retry_us_total 43"));
         assert!(output.contains("brewfs_writeback_slice_create_ops_total 8"));
@@ -2072,6 +2405,8 @@ mod tests {
         assert!(output.contains("brewfs_writeback_upload_batch_ops_total 17"));
         assert!(output.contains("brewfs_writeback_upload_batch_bytes_total 32768"));
         assert!(output.contains("brewfs_writeback_upload_batch_blocks_total 18"));
+        assert!(output.contains("brewfs_writeback_upload_batch_single_block_ops_total 64"));
+        assert!(output.contains("brewfs_writeback_upload_batch_multi_block_ops_total 65"));
         assert!(output.contains("brewfs_writeback_upload_partial_tail_ops_total 19"));
         assert!(output.contains("brewfs_writeback_upload_partial_tail_size_ops_total 20"));
         assert!(output.contains("brewfs_writeback_upload_partial_tail_max_unflushed_ops_total 21"));
@@ -2139,11 +2474,16 @@ mod tests {
         stats.sync_writeback_backpressure_metrics(66, 77, 88, 99);
         stats.sync_writeback_phase_metrics(111, 222, 333, 444, 555, 666, 777);
         stats.sync_writeback_commit_wait_metrics(778, 779, 780, 781);
+        stats.sync_writeback_commit_wait_breakdown_metrics(
+            782, 783, 784, 785, 786, 787, 788, 789, 790, 791, 792, 793, 794, 795, 796, 797, 798,
+            799, 800, 801,
+        );
         stats.sync_writeback_slice_selection_metrics(888, 999, 1000, 1001);
         stats.sync_writeback_freeze_metrics(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
         stats.sync_writeback_upload_batch_metrics(
             11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
         );
+        stats.sync_writeback_upload_batch_shape_metrics(802, 803);
         stats.sync_writeback_upload_origin_metrics(27, 28, 29, 30, 31, 32, 33, 34);
         stats.sync_object_store_metrics(2, 8192, 50, 1, 4096, 25, 75, 125, 3);
 
@@ -2187,6 +2527,35 @@ mod tests {
         assert_eq!(snapshot.writeback_commit_before_stage_ops, 777);
         assert_eq!(snapshot.writeback_commit_wait_upload_ops, 778);
         assert_eq!(snapshot.writeback_commit_wait_upload_us, 779);
+        assert_eq!(snapshot.writeback_commit_wait_upload_size_ops, 782);
+        assert_eq!(snapshot.writeback_commit_wait_upload_size_us, 783);
+        assert_eq!(snapshot.writeback_commit_wait_upload_max_unflushed_ops, 784);
+        assert_eq!(snapshot.writeback_commit_wait_upload_max_unflushed_us, 785);
+        assert_eq!(
+            snapshot.writeback_commit_wait_upload_explicit_flush_ops,
+            786
+        );
+        assert_eq!(snapshot.writeback_commit_wait_upload_explicit_flush_us, 787);
+        assert_eq!(snapshot.writeback_commit_wait_upload_auto_ops, 788);
+        assert_eq!(snapshot.writeback_commit_wait_upload_auto_us, 789);
+        assert_eq!(snapshot.writeback_commit_wait_upload_commit_age_ops, 790);
+        assert_eq!(snapshot.writeback_commit_wait_upload_commit_age_us, 791);
+        assert_eq!(
+            snapshot.writeback_commit_wait_upload_unknown_reason_ops,
+            792
+        );
+        assert_eq!(snapshot.writeback_commit_wait_upload_unknown_reason_us, 793);
+        assert_eq!(snapshot.writeback_commit_wait_upload_normal_only_ops, 794);
+        assert_eq!(snapshot.writeback_commit_wait_upload_normal_only_us, 795);
+        assert_eq!(snapshot.writeback_commit_wait_upload_cached_only_ops, 796);
+        assert_eq!(snapshot.writeback_commit_wait_upload_cached_only_us, 797);
+        assert_eq!(snapshot.writeback_commit_wait_upload_mixed_origin_ops, 798);
+        assert_eq!(snapshot.writeback_commit_wait_upload_mixed_origin_us, 799);
+        assert_eq!(
+            snapshot.writeback_commit_wait_upload_unknown_origin_ops,
+            800
+        );
+        assert_eq!(snapshot.writeback_commit_wait_upload_unknown_origin_us, 801);
         assert_eq!(snapshot.writeback_commit_wait_retry_ops, 780);
         assert_eq!(snapshot.writeback_commit_wait_retry_us, 781);
         assert_eq!(snapshot.writeback_slice_create_ops, 888);
@@ -2206,6 +2575,8 @@ mod tests {
         assert_eq!(snapshot.writeback_upload_batch_ops, 11);
         assert_eq!(snapshot.writeback_upload_batch_bytes, 12);
         assert_eq!(snapshot.writeback_upload_batch_blocks, 13);
+        assert_eq!(snapshot.writeback_upload_batch_single_block_ops, 802);
+        assert_eq!(snapshot.writeback_upload_batch_multi_block_ops, 803);
         assert_eq!(snapshot.writeback_upload_partial_tail_ops, 14);
         assert_eq!(snapshot.writeback_upload_partial_tail_size_ops, 15);
         assert_eq!(snapshot.writeback_upload_partial_tail_max_unflushed_ops, 16);

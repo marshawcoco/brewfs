@@ -811,6 +811,28 @@ where
                         dirty.commit_wait_retry_ops,
                         dirty.commit_wait_retry_us,
                     );
+                    fuse_stats.sync_writeback_commit_wait_breakdown_metrics(
+                        dirty.commit_wait_upload_size_ops,
+                        dirty.commit_wait_upload_size_us,
+                        dirty.commit_wait_upload_max_unflushed_ops,
+                        dirty.commit_wait_upload_max_unflushed_us,
+                        dirty.commit_wait_upload_explicit_flush_ops,
+                        dirty.commit_wait_upload_explicit_flush_us,
+                        dirty.commit_wait_upload_auto_ops,
+                        dirty.commit_wait_upload_auto_us,
+                        dirty.commit_wait_upload_commit_age_ops,
+                        dirty.commit_wait_upload_commit_age_us,
+                        dirty.commit_wait_upload_unknown_reason_ops,
+                        dirty.commit_wait_upload_unknown_reason_us,
+                        dirty.commit_wait_upload_normal_only_ops,
+                        dirty.commit_wait_upload_normal_only_us,
+                        dirty.commit_wait_upload_cached_only_ops,
+                        dirty.commit_wait_upload_cached_only_us,
+                        dirty.commit_wait_upload_mixed_origin_ops,
+                        dirty.commit_wait_upload_mixed_origin_us,
+                        dirty.commit_wait_upload_unknown_origin_ops,
+                        dirty.commit_wait_upload_unknown_origin_us,
+                    );
                     fuse_stats.sync_writeback_slice_selection_metrics(
                         dirty.slice_create_ops,
                         dirty.slice_reuse_ops,
@@ -846,6 +868,10 @@ where
                         dirty.upload_partial_tail_auto_flush_duration_ops,
                         dirty.upload_partial_tail_auto_unknown_ops,
                         dirty.upload_partial_tail_commit_age_ops,
+                    );
+                    fuse_stats.sync_writeback_upload_batch_shape_metrics(
+                        dirty.upload_batch_single_block_ops,
+                        dirty.upload_batch_multi_block_ops,
                     );
                     fuse_stats.sync_writeback_upload_origin_metrics(
                         dirty.upload_partial_tail_normal_only_ops,

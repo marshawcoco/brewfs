@@ -1435,3 +1435,101 @@ Candidate O: upload-wait attribution by freeze reason and batch shape.
     - if normal-only direct1 waits dominate, tune writeback upload scheduling
       or backpressure, not staging coverage.
 ```
+
+## 2026-06-12 Candidate O: Upload-Wait Attribution
+
+Hypothesis:
+
+- Candidate M showed commit retry/backoff is not the bottleneck; upload waits
+  dominate commit-loop delay.
+- Before changing scheduling/backpressure, split commit upload waits by freeze
+  reason and write origin, and expose upload batch shape so the next behavior
+  change can target the measured pressure source.
+
+Implementation:
+
+- Added commit-wait upload counters by freeze reason:
+  size/chunk-end, max-unflushed, explicit flush, auto, commit-age safety, and
+  unknown.
+- Added commit-wait upload counters by write origin:
+  normal-only, cached-only, mixed-origin, and unknown.
+- Added upload batch shape counters for single-block and multi-block batches.
+- Surfaced the new counters through `/metrics` and
+  `brewfs/tools/perf/compare_artifacts.py`.
+
+Functional verification:
+
+```text
+cargo fmt --all
+cargo test -p brewfs --lib 'vfs::io::writer::tests::test_writeback_phase_metrics_track_stage_and_remote_upload'
+cargo test -p brewfs --lib 'vfs::stats::tests::'
+cargo test -p brewfs --lib 'vfs::io::writer::tests::'
+bash brewfs/tools/perf/test_compare_artifacts.sh
+git diff --check
+cargo clippy -p brewfs --lib -- -D warnings
+```
+
+Perf artifacts:
+
+```text
+Candidate O full matrix:       perf-run-1781230033-6355
+Candidate O direct1 repeat:    perf-run-1781230549-2914
+Nearby HEAD direct1 baseline:  perf-run-1781230926-23364
+```
+
+Key results:
+
+```text
+Candidate O full matrix vs Candidate M direct0:
+  read_bw_mib_s 259.278 -> 259.393 (+0.0%)
+  write_bw_mib_s 117.817 -> 117.967 (+0.1%)
+  tool_wall_s 86 -> 77 (-10.5%)
+  post_write_drain_s 0 -> 15
+
+Candidate O full matrix vs Candidate M direct1:
+  prefill drain 52s, so treat this run as noisy for direct1 throughput.
+  read_bw_mib_s 209.146 -> 132.782 (-36.5%)
+  write_bw_mib_s 95.417 -> 61.744 (-35.3%)
+  post_write_drain_s 20 -> 38
+
+Candidate O direct1 repeat vs Candidate M direct1:
+  prefill drain 4s
+  read_bw_mib_s 209.146 -> 176.585 (-15.6%)
+  write_bw_mib_s 95.417 -> 79.990 (-16.2%)
+  post_write_drain_s 20 -> 22
+
+Candidate O direct1 repeat vs nearby HEAD direct1:
+  read_bw_mib_s 185.706 -> 176.585 (-4.9%)
+  write_bw_mib_s 85.587 -> 79.990 (-6.5%)
+  active_plus_drain_s 83.486 -> 88.008 (+5.4%)
+  post_write_drain_s 21 -> 22 (+4.8%)
+  post-drained PUT/GiB 258.681 -> 255.418 (-1.3%)
+  post-drained upload byte amplification 0.940 -> 0.938 (-0.2%)
+```
+
+Decision:
+
+- Accept Candidate O as observability with caution, not as a performance
+  improvement.
+- The first direct1 run was dominated by a slow prefill/object-store tail and
+  is not a fair code comparison. The nearby A/B still shows a small direct1
+  throughput loss, but object count and upload amplification are neutral or
+  slightly better; the difference is most visible as S3 PUT average latency.
+- Keep the new metrics because they are required to pick the next behavior
+  candidate, and gate the next code change against the nearby HEAD direct1
+  numbers above.
+
+Next target:
+
+```text
+Candidate P: reduce direct1 upload hard-wait tail without increasing object
+amplification.
+  Use Candidate O attribution to identify which reason/origin pair dominates:
+    - if normal-only max-unflushed waits dominate, tune upload scheduling so
+      already-frozen normal slices get remote capacity before more small tail
+      work;
+    - if cached-only auto waits dominate, tune cached-origin idle/too-many
+      dispatch instead;
+    - keep direct0 read/write within 2% and direct1 active+drain no worse than
+      the nearby HEAD direct1 baseline.
+```

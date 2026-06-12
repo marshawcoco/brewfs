@@ -317,6 +317,90 @@ STAT_METRICS = {
     "brewfs_writeback_commit_before_stage_ops_total": ("writeback_commit_before_stage_ops", "ops", 1.0),
     "brewfs_writeback_commit_wait_upload_ops_total": ("writeback_commit_wait_upload_ops", "ops", 1.0),
     "brewfs_writeback_commit_wait_upload_us_total": ("writeback_commit_wait_upload_ms", "ms", 1000.0),
+    "brewfs_writeback_commit_wait_upload_size_ops_total": ("writeback_commit_wait_upload_size_ops", "ops", 1.0),
+    "brewfs_writeback_commit_wait_upload_size_us_total": ("writeback_commit_wait_upload_size_ms", "ms", 1000.0),
+    "brewfs_writeback_commit_wait_upload_max_unflushed_ops_total": (
+        "writeback_commit_wait_upload_max_unflushed_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_max_unflushed_us_total": (
+        "writeback_commit_wait_upload_max_unflushed_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_explicit_flush_ops_total": (
+        "writeback_commit_wait_upload_explicit_flush_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_explicit_flush_us_total": (
+        "writeback_commit_wait_upload_explicit_flush_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_auto_ops_total": ("writeback_commit_wait_upload_auto_ops", "ops", 1.0),
+    "brewfs_writeback_commit_wait_upload_auto_us_total": ("writeback_commit_wait_upload_auto_ms", "ms", 1000.0),
+    "brewfs_writeback_commit_wait_upload_commit_age_ops_total": (
+        "writeback_commit_wait_upload_commit_age_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_commit_age_us_total": (
+        "writeback_commit_wait_upload_commit_age_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_unknown_reason_ops_total": (
+        "writeback_commit_wait_upload_unknown_reason_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_unknown_reason_us_total": (
+        "writeback_commit_wait_upload_unknown_reason_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_normal_only_ops_total": (
+        "writeback_commit_wait_upload_normal_only_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_normal_only_us_total": (
+        "writeback_commit_wait_upload_normal_only_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_cached_only_ops_total": (
+        "writeback_commit_wait_upload_cached_only_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_cached_only_us_total": (
+        "writeback_commit_wait_upload_cached_only_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_mixed_origin_ops_total": (
+        "writeback_commit_wait_upload_mixed_origin_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_mixed_origin_us_total": (
+        "writeback_commit_wait_upload_mixed_origin_ms",
+        "ms",
+        1000.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_unknown_origin_ops_total": (
+        "writeback_commit_wait_upload_unknown_origin_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_commit_wait_upload_unknown_origin_us_total": (
+        "writeback_commit_wait_upload_unknown_origin_ms",
+        "ms",
+        1000.0,
+    ),
     "brewfs_writeback_commit_wait_retry_ops_total": ("writeback_commit_wait_retry_ops", "ops", 1.0),
     "brewfs_writeback_commit_wait_retry_us_total": ("writeback_commit_wait_retry_ms", "ms", 1000.0),
     "brewfs_writeback_slice_create_ops_total": ("writeback_slice_create_ops", "ops", 1.0),
@@ -378,6 +462,16 @@ STAT_METRICS = {
     "brewfs_writeback_upload_batch_blocks_total": (
         "writeback_upload_batch_blocks",
         "blocks",
+        1.0,
+    ),
+    "brewfs_writeback_upload_batch_single_block_ops_total": (
+        "writeback_upload_batch_single_block_ops",
+        "ops",
+        1.0,
+    ),
+    "brewfs_writeback_upload_batch_multi_block_ops_total": (
+        "writeback_upload_batch_multi_block_ops",
+        "ops",
         1.0,
     ),
     "brewfs_writeback_upload_partial_tail_ops_total": (
@@ -538,6 +632,9 @@ def append_stats_derived_metrics(metrics: list[Metric], item: str, raw_metrics: 
     upload_batch_ops = raw_metric(raw_metrics, "brewfs_writeback_upload_batch_ops_total")
     upload_batch_bytes = raw_metric(raw_metrics, "brewfs_writeback_upload_batch_bytes_total")
     upload_batch_blocks = raw_metric(raw_metrics, "brewfs_writeback_upload_batch_blocks_total")
+    upload_batch_single_block_ops = raw_metric(
+        raw_metrics, "brewfs_writeback_upload_batch_single_block_ops_total"
+    )
     partial_tail_ops = raw_metric(raw_metrics, "brewfs_writeback_upload_partial_tail_ops_total")
 
     append_ratio_metric(metrics, item, "upload_byte_amp", put_bytes, fuse_write_bytes, "ratio")
@@ -570,6 +667,14 @@ def append_stats_derived_metrics(metrics: list[Metric], item: str, raw_metrics: 
         upload_batch_blocks,
         upload_batch_ops,
         "blocks/op",
+    )
+    append_ratio_metric(
+        metrics,
+        item,
+        "writeback_single_block_batch_ratio",
+        upload_batch_single_block_ops,
+        upload_batch_ops,
+        "ratio",
     )
     append_ratio_metric(
         metrics,

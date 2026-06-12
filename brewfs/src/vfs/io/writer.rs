@@ -694,6 +694,8 @@ where
             status: s.state,
             err: s.err.clone(),
             frozen: !matches!(s.state, SliceStatus::Writable),
+            freeze_reason: s.freeze_reason,
+            write_origin: s.write_origin_kind(),
             started: s.started,
             notify: s.notify.clone(),
         })
@@ -960,6 +962,8 @@ struct SliceRuntime {
     status: SliceStatus,
     err: Option<String>,
     frozen: bool,
+    freeze_reason: Option<SliceFreezeReason>,
+    write_origin: WriteOriginKind,
     started: Instant,
     notify: Arc<Notify>,
 }
@@ -1234,6 +1238,26 @@ struct RecentPendingUploadState {
     commit_before_stage_ops: AtomicU64,
     commit_wait_upload_ops: AtomicU64,
     commit_wait_upload_us: AtomicU64,
+    commit_wait_upload_size_ops: AtomicU64,
+    commit_wait_upload_size_us: AtomicU64,
+    commit_wait_upload_max_unflushed_ops: AtomicU64,
+    commit_wait_upload_max_unflushed_us: AtomicU64,
+    commit_wait_upload_explicit_flush_ops: AtomicU64,
+    commit_wait_upload_explicit_flush_us: AtomicU64,
+    commit_wait_upload_auto_ops: AtomicU64,
+    commit_wait_upload_auto_us: AtomicU64,
+    commit_wait_upload_commit_age_ops: AtomicU64,
+    commit_wait_upload_commit_age_us: AtomicU64,
+    commit_wait_upload_unknown_reason_ops: AtomicU64,
+    commit_wait_upload_unknown_reason_us: AtomicU64,
+    commit_wait_upload_normal_only_ops: AtomicU64,
+    commit_wait_upload_normal_only_us: AtomicU64,
+    commit_wait_upload_cached_only_ops: AtomicU64,
+    commit_wait_upload_cached_only_us: AtomicU64,
+    commit_wait_upload_mixed_origin_ops: AtomicU64,
+    commit_wait_upload_mixed_origin_us: AtomicU64,
+    commit_wait_upload_unknown_origin_ops: AtomicU64,
+    commit_wait_upload_unknown_origin_us: AtomicU64,
     commit_wait_retry_ops: AtomicU64,
     commit_wait_retry_us: AtomicU64,
     slice_create_ops: AtomicU64,
@@ -1253,6 +1277,8 @@ struct RecentPendingUploadState {
     upload_batch_ops: AtomicU64,
     upload_batch_bytes: AtomicU64,
     upload_batch_blocks: AtomicU64,
+    upload_batch_single_block_ops: AtomicU64,
+    upload_batch_multi_block_ops: AtomicU64,
     upload_partial_tail_ops: AtomicU64,
     upload_partial_tail_size_ops: AtomicU64,
     upload_partial_tail_max_unflushed_ops: AtomicU64,
@@ -1305,6 +1331,26 @@ impl RecentPendingUploadState {
             commit_before_stage_ops: AtomicU64::new(0),
             commit_wait_upload_ops: AtomicU64::new(0),
             commit_wait_upload_us: AtomicU64::new(0),
+            commit_wait_upload_size_ops: AtomicU64::new(0),
+            commit_wait_upload_size_us: AtomicU64::new(0),
+            commit_wait_upload_max_unflushed_ops: AtomicU64::new(0),
+            commit_wait_upload_max_unflushed_us: AtomicU64::new(0),
+            commit_wait_upload_explicit_flush_ops: AtomicU64::new(0),
+            commit_wait_upload_explicit_flush_us: AtomicU64::new(0),
+            commit_wait_upload_auto_ops: AtomicU64::new(0),
+            commit_wait_upload_auto_us: AtomicU64::new(0),
+            commit_wait_upload_commit_age_ops: AtomicU64::new(0),
+            commit_wait_upload_commit_age_us: AtomicU64::new(0),
+            commit_wait_upload_unknown_reason_ops: AtomicU64::new(0),
+            commit_wait_upload_unknown_reason_us: AtomicU64::new(0),
+            commit_wait_upload_normal_only_ops: AtomicU64::new(0),
+            commit_wait_upload_normal_only_us: AtomicU64::new(0),
+            commit_wait_upload_cached_only_ops: AtomicU64::new(0),
+            commit_wait_upload_cached_only_us: AtomicU64::new(0),
+            commit_wait_upload_mixed_origin_ops: AtomicU64::new(0),
+            commit_wait_upload_mixed_origin_us: AtomicU64::new(0),
+            commit_wait_upload_unknown_origin_ops: AtomicU64::new(0),
+            commit_wait_upload_unknown_origin_us: AtomicU64::new(0),
             commit_wait_retry_ops: AtomicU64::new(0),
             commit_wait_retry_us: AtomicU64::new(0),
             slice_create_ops: AtomicU64::new(0),
@@ -1324,6 +1370,8 @@ impl RecentPendingUploadState {
             upload_batch_ops: AtomicU64::new(0),
             upload_batch_bytes: AtomicU64::new(0),
             upload_batch_blocks: AtomicU64::new(0),
+            upload_batch_single_block_ops: AtomicU64::new(0),
+            upload_batch_multi_block_ops: AtomicU64::new(0),
             upload_partial_tail_ops: AtomicU64::new(0),
             upload_partial_tail_size_ops: AtomicU64::new(0),
             upload_partial_tail_max_unflushed_ops: AtomicU64::new(0),
@@ -1396,12 +1444,66 @@ impl RecentPendingUploadState {
         self.commit_before_stage_ops.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_commit_wait_upload(&self, duration: Duration) {
+    fn record_commit_wait_upload(
+        &self,
+        duration: Duration,
+        reason: Option<SliceFreezeReason>,
+        origin: WriteOriginKind,
+    ) {
+        let elapsed_us = duration.as_micros().min(u128::from(u64::MAX)) as u64;
         self.commit_wait_upload_ops.fetch_add(1, Ordering::Relaxed);
-        self.commit_wait_upload_us.fetch_add(
-            duration.as_micros().min(u128::from(u64::MAX)) as u64,
-            Ordering::Relaxed,
-        );
+        self.commit_wait_upload_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
+
+        let (reason_ops, reason_us) = match reason {
+            Some(SliceFreezeReason::SizeOrChunkEnd) => (
+                &self.commit_wait_upload_size_ops,
+                &self.commit_wait_upload_size_us,
+            ),
+            Some(SliceFreezeReason::MaxUnflushed) => (
+                &self.commit_wait_upload_max_unflushed_ops,
+                &self.commit_wait_upload_max_unflushed_us,
+            ),
+            Some(SliceFreezeReason::ExplicitFlush) => (
+                &self.commit_wait_upload_explicit_flush_ops,
+                &self.commit_wait_upload_explicit_flush_us,
+            ),
+            Some(SliceFreezeReason::Auto) => (
+                &self.commit_wait_upload_auto_ops,
+                &self.commit_wait_upload_auto_us,
+            ),
+            Some(SliceFreezeReason::CommitAgeSafety) => (
+                &self.commit_wait_upload_commit_age_ops,
+                &self.commit_wait_upload_commit_age_us,
+            ),
+            None => (
+                &self.commit_wait_upload_unknown_reason_ops,
+                &self.commit_wait_upload_unknown_reason_us,
+            ),
+        };
+        reason_ops.fetch_add(1, Ordering::Relaxed);
+        reason_us.fetch_add(elapsed_us, Ordering::Relaxed);
+
+        let (origin_ops, origin_us) = match origin {
+            WriteOriginKind::NormalOnly => (
+                &self.commit_wait_upload_normal_only_ops,
+                &self.commit_wait_upload_normal_only_us,
+            ),
+            WriteOriginKind::CachedOnly => (
+                &self.commit_wait_upload_cached_only_ops,
+                &self.commit_wait_upload_cached_only_us,
+            ),
+            WriteOriginKind::Mixed => (
+                &self.commit_wait_upload_mixed_origin_ops,
+                &self.commit_wait_upload_mixed_origin_us,
+            ),
+            WriteOriginKind::Unknown => (
+                &self.commit_wait_upload_unknown_origin_ops,
+                &self.commit_wait_upload_unknown_origin_us,
+            ),
+        };
+        origin_ops.fetch_add(1, Ordering::Relaxed);
+        origin_us.fetch_add(elapsed_us, Ordering::Relaxed);
     }
 
     fn record_commit_wait_retry(&self, duration: Duration) {
@@ -1463,6 +1565,13 @@ impl RecentPendingUploadState {
         self.upload_batch_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.upload_batch_blocks
             .fetch_add(blocks, Ordering::Relaxed);
+        if blocks <= 1 {
+            self.upload_batch_single_block_ops
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.upload_batch_multi_block_ops
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if partial_tail {
             self.upload_partial_tail_ops.fetch_add(1, Ordering::Relaxed);
             let origin_counter = match partial_tail_origin {
@@ -2728,9 +2837,11 @@ where
                 let wait_result = timeout(COMMIT_WAIT_SLICE, runtime.notify.notified())
                     .instrument(tracing::trace_span!("commit_chunk.wait_upload"))
                     .await;
-                shared
-                    .recent_pending_upload
-                    .record_commit_wait_upload(wait_start.elapsed());
+                shared.recent_pending_upload.record_commit_wait_upload(
+                    wait_start.elapsed(),
+                    runtime.freeze_reason,
+                    runtime.write_origin,
+                );
                 if wait_result.is_ok() {
                     continue;
                 }
@@ -3347,6 +3458,26 @@ pub(crate) struct WritebackDirtyBreakdown {
     pub commit_before_stage_ops: u64,
     pub commit_wait_upload_ops: u64,
     pub commit_wait_upload_us: u64,
+    pub commit_wait_upload_size_ops: u64,
+    pub commit_wait_upload_size_us: u64,
+    pub commit_wait_upload_max_unflushed_ops: u64,
+    pub commit_wait_upload_max_unflushed_us: u64,
+    pub commit_wait_upload_explicit_flush_ops: u64,
+    pub commit_wait_upload_explicit_flush_us: u64,
+    pub commit_wait_upload_auto_ops: u64,
+    pub commit_wait_upload_auto_us: u64,
+    pub commit_wait_upload_commit_age_ops: u64,
+    pub commit_wait_upload_commit_age_us: u64,
+    pub commit_wait_upload_unknown_reason_ops: u64,
+    pub commit_wait_upload_unknown_reason_us: u64,
+    pub commit_wait_upload_normal_only_ops: u64,
+    pub commit_wait_upload_normal_only_us: u64,
+    pub commit_wait_upload_cached_only_ops: u64,
+    pub commit_wait_upload_cached_only_us: u64,
+    pub commit_wait_upload_mixed_origin_ops: u64,
+    pub commit_wait_upload_mixed_origin_us: u64,
+    pub commit_wait_upload_unknown_origin_ops: u64,
+    pub commit_wait_upload_unknown_origin_us: u64,
     pub commit_wait_retry_ops: u64,
     pub commit_wait_retry_us: u64,
     pub slice_create_ops: u64,
@@ -3366,6 +3497,8 @@ pub(crate) struct WritebackDirtyBreakdown {
     pub upload_batch_ops: u64,
     pub upload_batch_bytes: u64,
     pub upload_batch_blocks: u64,
+    pub upload_batch_single_block_ops: u64,
+    pub upload_batch_multi_block_ops: u64,
     pub upload_partial_tail_ops: u64,
     pub upload_partial_tail_size_ops: u64,
     pub upload_partial_tail_max_unflushed_ops: u64,
@@ -3495,6 +3628,86 @@ where
                 .recent_pending_upload
                 .commit_wait_upload_us
                 .load(Ordering::Relaxed),
+            commit_wait_upload_size_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_size_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_size_us: self
+                .recent_pending_upload
+                .commit_wait_upload_size_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_max_unflushed_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_max_unflushed_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_max_unflushed_us: self
+                .recent_pending_upload
+                .commit_wait_upload_max_unflushed_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_explicit_flush_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_explicit_flush_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_explicit_flush_us: self
+                .recent_pending_upload
+                .commit_wait_upload_explicit_flush_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_auto_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_auto_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_auto_us: self
+                .recent_pending_upload
+                .commit_wait_upload_auto_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_commit_age_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_commit_age_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_commit_age_us: self
+                .recent_pending_upload
+                .commit_wait_upload_commit_age_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_unknown_reason_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_unknown_reason_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_unknown_reason_us: self
+                .recent_pending_upload
+                .commit_wait_upload_unknown_reason_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_normal_only_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_normal_only_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_normal_only_us: self
+                .recent_pending_upload
+                .commit_wait_upload_normal_only_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_cached_only_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_cached_only_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_cached_only_us: self
+                .recent_pending_upload
+                .commit_wait_upload_cached_only_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_mixed_origin_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_mixed_origin_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_mixed_origin_us: self
+                .recent_pending_upload
+                .commit_wait_upload_mixed_origin_us
+                .load(Ordering::Relaxed),
+            commit_wait_upload_unknown_origin_ops: self
+                .recent_pending_upload
+                .commit_wait_upload_unknown_origin_ops
+                .load(Ordering::Relaxed),
+            commit_wait_upload_unknown_origin_us: self
+                .recent_pending_upload
+                .commit_wait_upload_unknown_origin_us
+                .load(Ordering::Relaxed),
             commit_wait_retry_ops: self
                 .recent_pending_upload
                 .commit_wait_retry_ops
@@ -3570,6 +3783,14 @@ where
             upload_batch_blocks: self
                 .recent_pending_upload
                 .upload_batch_blocks
+                .load(Ordering::Relaxed),
+            upload_batch_single_block_ops: self
+                .recent_pending_upload
+                .upload_batch_single_block_ops
+                .load(Ordering::Relaxed),
+            upload_batch_multi_block_ops: self
+                .recent_pending_upload
+                .upload_batch_multi_block_ops
                 .load(Ordering::Relaxed),
             upload_partial_tail_ops: self
                 .recent_pending_upload
@@ -3993,8 +4214,14 @@ mod tests {
         }
 
         state.record_commit_before_stage();
-        state.record_commit_wait_upload(Duration::from_micros(21));
+        state.record_commit_wait_upload(
+            Duration::from_micros(21),
+            Some(SliceFreezeReason::Auto),
+            WriteOriginKind::CachedOnly,
+        );
         state.record_commit_wait_retry(Duration::from_micros(34));
+        state.record_upload_batch(4096, 1, false, None, None, WriteOriginKind::NormalOnly);
+        state.record_upload_batch(8192, 2, false, None, None, WriteOriginKind::NormalOnly);
 
         assert_eq!(state.stage_inflight_bytes.load(Ordering::Acquire), 0);
         assert_eq!(
@@ -4008,6 +4235,28 @@ mod tests {
         assert_eq!(state.commit_before_stage_ops.load(Ordering::Relaxed), 1);
         assert_eq!(state.commit_wait_upload_ops.load(Ordering::Relaxed), 1);
         assert_eq!(state.commit_wait_upload_us.load(Ordering::Relaxed), 21);
+        assert_eq!(state.commit_wait_upload_auto_ops.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_wait_upload_auto_us.load(Ordering::Relaxed), 21);
+        assert_eq!(
+            state
+                .commit_wait_upload_cached_only_ops
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .commit_wait_upload_cached_only_us
+                .load(Ordering::Relaxed),
+            21
+        );
+        assert_eq!(
+            state.upload_batch_single_block_ops.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state.upload_batch_multi_block_ops.load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(state.commit_wait_retry_ops.load(Ordering::Relaxed), 1);
         assert_eq!(state.commit_wait_retry_us.load(Ordering::Relaxed), 34);
     }
