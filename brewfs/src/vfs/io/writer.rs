@@ -2857,6 +2857,105 @@ where
         empty
     }
 
+    async fn try_commit_before_upload_front(
+        shared: &Arc<Shared<B, M>>,
+        slice: &Arc<ParkingMutex<SliceState>>,
+    ) -> bool {
+        if !matches!(
+            shared.config.writeback_mode,
+            WriteBackMode::CommitBeforeUpload
+        ) {
+            return false;
+        }
+
+        let handle = SliceHandle { slice, shared };
+        let runtime = handle.runtime_snapshot();
+        if !runtime.frozen || runtime.upload_done() {
+            return false;
+        }
+
+        let Some(desc) = handle.desc_for_commit() else {
+            return false;
+        };
+
+        if let Err(err) = Self::seal_writeback_record_if_ready(shared, slice).await {
+            warn!(
+                chunk_id = desc.chunk_id,
+                slice_id = desc.slice_id,
+                error = ?err,
+                "writeback record seal failed before commit-before-upload"
+            );
+            return false;
+        }
+
+        let stage_ready = {
+            let s = slice.lock();
+            shared.write_back.is_none() || s.writeback_fully_persisted()
+        };
+        if !stage_ready {
+            return false;
+        }
+
+        let (claimed, commit_before_stage) = {
+            let mut s = slice.lock();
+            if s.meta_write_started {
+                (false, false)
+            } else {
+                s.meta_write_started = true;
+                (
+                    true,
+                    shared.write_back.is_some() && !s.writeback_fully_persisted(),
+                )
+            }
+        };
+
+        if !claimed {
+            return false;
+        }
+        if commit_before_stage {
+            shared.recent_pending_upload.record_commit_before_stage();
+        }
+
+        let (ino, chunk_index) = extract_ino_and_chunk_index(desc.chunk_id);
+        let file_offset = chunk_index * shared.config.layout.chunk_size + desc.offset;
+        let new_size = file_offset + desc.length;
+
+        let result = shared
+            .backend
+            .meta()
+            .write(ino, desc.chunk_id, desc, new_size)
+            .await;
+
+        match result {
+            Ok(()) => {
+                shared.inode.set_committed_size(new_size);
+                shared
+                    .inode
+                    .add_estimated_allocated_bytes(desc.length.as_usize() as u64);
+                let _ = shared
+                    .reader
+                    .invalidate(ino as u64, file_offset, desc.length.as_usize())
+                    .await;
+                handle.mark_committed();
+                true
+            }
+            Err(err) => {
+                slice.lock().meta_write_started = false;
+                warn!(
+                    ino,
+                    chunk_id = desc.chunk_id,
+                    slice_id = desc.slice_id,
+                    offset = desc.offset,
+                    len = desc.length,
+                    new_size,
+                    error = ?err,
+                    "commit-before-upload metadata write failed; falling back to upload-before-commit wait"
+                );
+                false
+            }
+        }
+    }
+
     /// The background thread for committing a chunk.
     /// It waits for Uploaded slices, appends metadata, and marks them Committed.
     /// Each chunk will have a unique committing thread.
@@ -2933,6 +3032,19 @@ where
             }
 
             if !runtime.upload_done() {
+                let handle = SliceHandle {
+                    slice: &slice,
+                    shared: &shared,
+                };
+                if runtime.frozen && Self::try_commit_before_upload_front(&shared, &slice).await {
+                    commit_failures = 0;
+                    if handle.can_continue_upload() {
+                        Self::spawn_flush_slice(shared.clone(), slice.clone());
+                    }
+                    Self::move_front_slice_to_recently_committed(&shared, chunk_id, &slice).await;
+                    continue;
+                }
+
                 let wait_start = Instant::now();
                 let wait_result = timeout(COMMIT_WAIT_SLICE, runtime.notify.notified())
                     .instrument(tracing::trace_span!("commit_chunk.wait_upload"))
@@ -2943,121 +3055,24 @@ where
                     runtime.write_origin,
                 );
                 if wait_result.is_ok() {
+                    if Self::try_commit_before_upload_front(&shared, &slice).await {
+                        commit_failures = 0;
+                        if handle.can_continue_upload() {
+                            Self::spawn_flush_slice(shared.clone(), slice.clone());
+                        }
+                        Self::move_front_slice_to_recently_committed(&shared, chunk_id, &slice)
+                            .await;
+                    }
                     continue;
                 }
-
-                let handle = SliceHandle {
-                    slice: &slice,
-                    shared: &shared,
-                };
 
                 // A frozen slice must eventually have an upload task.  Flush and
                 // auto-flush normally spawn it, but a race can leave commit
                 // waiting on a Readonly slice with no uploader.  Re-kick it here
                 // so FUSE flush/truncate cannot wait forever on commit progress.
                 if runtime.frozen {
-                    let early_committed = if matches!(
-                        shared.config.writeback_mode,
-                        WriteBackMode::CommitBeforeUpload
-                    ) {
-                        // CommitBeforeUpload: commit metadata immediately while
-                        // upload proceeds in background.
-                        let desc = handle.desc_for_commit();
-
-                        if let Some(desc) = desc {
-                            if let Err(err) =
-                                Self::seal_writeback_record_if_ready(&shared, &slice).await
-                            {
-                                warn!(
-                                    chunk_id = desc.chunk_id,
-                                    slice_id = desc.slice_id,
-                                    error = ?err,
-                                    "writeback record seal failed before commit-before-upload"
-                                );
-                                continue;
-                            }
-
-                            let stage_ready = {
-                                let s = slice.lock();
-                                shared.write_back.is_none() || s.writeback_fully_persisted()
-                            };
-                            if !stage_ready {
-                                false
-                            } else {
-                                let (claimed, commit_before_stage) = {
-                                    let mut s = slice.lock();
-                                    if s.meta_write_started {
-                                        (false, false)
-                                    } else {
-                                        s.meta_write_started = true;
-                                        (
-                                            true,
-                                            shared.write_back.is_some()
-                                                && !s.writeback_fully_persisted(),
-                                        )
-                                    }
-                                };
-
-                                if !claimed {
-                                    continue;
-                                }
-                                if commit_before_stage {
-                                    shared.recent_pending_upload.record_commit_before_stage();
-                                }
-
-                                let (ino, chunk_index) = extract_ino_and_chunk_index(desc.chunk_id);
-                                let file_offset =
-                                    chunk_index * shared.config.layout.chunk_size + desc.offset;
-                                let new_size = file_offset + desc.length;
-
-                                let result = shared
-                                    .backend
-                                    .meta()
-                                    .write(ino, desc.chunk_id, desc, new_size)
-                                    .await;
-
-                                match result {
-                                    Ok(()) => {
-                                        commit_failures = 0;
-                                        shared.inode.set_committed_size(new_size);
-                                        shared.inode.add_estimated_allocated_bytes(
-                                            desc.length.as_usize() as u64,
-                                        );
-                                        let _ = shared
-                                            .reader
-                                            .invalidate(
-                                                ino as u64,
-                                                file_offset,
-                                                desc.length.as_usize(),
-                                            )
-                                            .await;
-                                        handle.mark_committed();
-                                        true
-                                    }
-                                    Err(err) => {
-                                        slice.lock().meta_write_started = false;
-                                        warn!(
-                                            ino,
-                                            chunk_id = desc.chunk_id,
-                                            slice_id = desc.slice_id,
-                                            offset = desc.offset,
-                                            len = desc.length,
-                                            new_size,
-                                            error = ?err,
-                                            "commit-before-upload metadata write failed; falling back to upload-before-commit wait"
-                                        );
-                                        false
-                                    }
-                                }
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if early_committed {
+                    if Self::try_commit_before_upload_front(&shared, &slice).await {
+                        commit_failures = 0;
                         if handle.can_continue_upload() {
                             Self::spawn_flush_slice(shared.clone(), slice.clone());
                         }
@@ -4944,6 +4959,71 @@ mod tests {
         })
         .await
         .expect("uploaded committed data should stop participating in overlay");
+    }
+
+    #[tokio::test]
+    async fn test_commit_before_upload_commits_on_stage_notify_without_wait_timeout() {
+        let layout = ChunkLayout {
+            chunk_size: 8 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(BlockingStore::new(true));
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store.clone(), meta.clone()));
+        let ino = meta
+            .create_file(1, "stage_notify_early_commit.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        let write_back = Arc::new(
+            crate::vfs::cache::write_back::FsWriteBackCache::new_with_sync(
+                temp.path().to_path_buf(),
+                false,
+            ),
+        );
+        let writer = Arc::new(DataWriter::new(
+            test_config_with_writeback(layout, WriteBackMode::CommitBeforeUpload),
+            backend,
+            reader,
+            Some(write_back),
+        ));
+        let file_writer = writer.ensure_file(inode);
+
+        let data = vec![9u8; layout.block_size as usize];
+        file_writer.write_at(0, &data).await.unwrap();
+
+        let started = Instant::now();
+        timeout(Duration::from_secs(2), file_writer.flush())
+            .await
+            .expect("commit-before-upload flush should not wait for blocked object upload")
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        let breakdown = writer.dirty_breakdown().await;
+        assert!(
+            breakdown.commit_wait_upload_us < COMMIT_WAIT_SLICE.as_micros() as u64,
+            "stage-ready commit should not wait for the {:?} upload poll timeout; waited {}us, flush elapsed {:?}",
+            COMMIT_WAIT_SLICE,
+            breakdown.commit_wait_upload_us,
+            elapsed
+        );
+        assert_eq!(
+            breakdown.commit_before_stage_ops, 0,
+            "metadata must not commit before the writeback stage record is sealed"
+        );
+        assert_eq!(
+            writer.recent_pending_upload_bytes(),
+            layout.block_size as u64,
+            "remote upload should still be pending while S3 is blocked"
+        );
+
+        store.unblock();
     }
 
     #[tokio::test]
