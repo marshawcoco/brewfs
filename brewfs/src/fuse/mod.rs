@@ -1386,7 +1386,7 @@ where
     // Rename (files or directories)
     async fn rename(
         &self,
-        _req: Request,
+        req: Request,
         parent: u64,
         name: &OsStr,
         new_parent: u64,
@@ -1432,6 +1432,13 @@ where
         };
         if !matches!(pattr.kind, VfsFileType::Dir) {
             return Err(libc::ENOTDIR.into());
+        }
+
+        self.ensure_directory_parent_namespace_mutation_allowed(parent, req.uid, req.gid)
+            .await?;
+        if parent != new_parent {
+            self.ensure_directory_parent_namespace_mutation_allowed(new_parent, req.uid, req.gid)
+                .await?;
         }
 
         // Flush pending writes for the source inode before the rename so
@@ -2417,9 +2424,11 @@ mod fuse_init_tests {
     use super::*;
     use crate::chunk::layout::ChunkLayout;
     use crate::chunk::store::InMemoryBlockStore;
+    use crate::meta::MetaLayer;
     use crate::meta::factory::create_meta_store_from_url;
     use rfuse3::raw::Filesystem;
     use rfuse3::raw::flags::FOPEN_DIRECT_IO;
+    use std::ffi::OsStr;
     use std::sync::{Mutex as StdMutex, OnceLock};
 
     fn env_lock() -> &'static StdMutex<()> {
@@ -2427,16 +2436,83 @@ mod fuse_init_tests {
         LOCK.get_or_init(|| StdMutex::new(()))
     }
 
-    #[tokio::test]
-    async fn init_reply_advertises_large_write_requests() {
+    async fn new_fuse_test_vfs() -> VFS<InMemoryBlockStore, impl MetaLayer> {
         let layout = ChunkLayout::default();
         let store = InMemoryBlockStore::new();
         let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
-        let fs = VFS::new(layout, store, meta_handle.store()).await.unwrap();
+        VFS::new(layout, store, meta_handle.store()).await.unwrap()
+    }
+
+    fn user_request() -> Request {
+        Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 42,
+        }
+    }
+
+    #[tokio::test]
+    async fn init_reply_advertises_large_write_requests() {
+        let fs = new_fuse_test_vfs().await;
 
         let reply = Filesystem::init(&fs, Request::default()).await.unwrap();
 
         assert_eq!(reply.max_write.get(), 4 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn rename_requires_namespace_access_on_source_parent() {
+        let fs = new_fuse_test_vfs().await;
+        fs.mkdir_p("/src").await.unwrap();
+        fs.mkdir_p("/dst").await.unwrap();
+        fs.create_file("/src/file.txt").await.unwrap();
+
+        let src = fs.stat("/src").await.unwrap();
+        let dst = fs.stat("/dst").await.unwrap();
+        fs.chmod(dst.ino, 0o777).await.unwrap();
+
+        let err = Filesystem::rename(
+            &fs,
+            user_request(),
+            src.ino as u64,
+            OsStr::new("file.txt"),
+            dst.ino as u64,
+            OsStr::new("moved.txt"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, Errno::from(libc::EACCES));
+        assert!(fs.stat("/src/file.txt").await.is_ok());
+        assert!(fs.stat("/dst/moved.txt").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rename_requires_namespace_access_on_destination_parent() {
+        let fs = new_fuse_test_vfs().await;
+        fs.mkdir_p("/src").await.unwrap();
+        fs.mkdir_p("/dst").await.unwrap();
+        fs.create_file("/src/file.txt").await.unwrap();
+
+        let src = fs.stat("/src").await.unwrap();
+        let dst = fs.stat("/dst").await.unwrap();
+        fs.chmod(src.ino, 0o777).await.unwrap();
+
+        let err = Filesystem::rename(
+            &fs,
+            user_request(),
+            src.ino as u64,
+            OsStr::new("file.txt"),
+            dst.ino as u64,
+            OsStr::new("moved.txt"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, Errno::from(libc::EACCES));
+        assert!(fs.stat("/src/file.txt").await.is_ok());
+        assert!(fs.stat("/dst/moved.txt").await.is_err());
     }
 
     #[test]
