@@ -356,6 +356,11 @@ fn non_empty_trimmed(value: String) -> Option<String> {
 }
 
 fn redact_connection_string(value: &str) -> String {
+    let value = redact_authority_password(value);
+    redact_sensitive_query_params(&value)
+}
+
+fn redact_authority_password(value: &str) -> String {
     let Some(scheme_index) = value.find("://") else {
         return value.to_owned();
     };
@@ -373,6 +378,52 @@ fn redact_connection_string(value: &str) -> String {
     redacted.push_str("<redacted>");
     redacted.push_str(&value[authority_end..]);
     redacted
+}
+
+fn redact_sensitive_query_params(value: &str) -> String {
+    let Some(query_marker) = value.find('?') else {
+        return value.to_owned();
+    };
+    let query_start = query_marker + 1;
+    let fragment_offset = value[query_start..]
+        .find('#')
+        .map(|offset| query_start + offset)
+        .unwrap_or(value.len());
+    let query = &value[query_start..fragment_offset];
+    let redacted_query = query
+        .split('&')
+        .map(redact_query_pair)
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let mut redacted = String::with_capacity(value.len());
+    redacted.push_str(&value[..query_start]);
+    redacted.push_str(&redacted_query);
+    redacted.push_str(&value[fragment_offset..]);
+    redacted
+}
+
+fn redact_query_pair(pair: &str) -> String {
+    let Some(eq_index) = pair.find('=') else {
+        return pair.to_owned();
+    };
+    let key = &pair[..eq_index];
+    if is_sensitive_query_key(key) {
+        format!("{key}=<redacted>")
+    } else {
+        pair.to_owned()
+    }
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("passwd")
+        || normalized.contains("token")
+        || normalized.contains("access_key")
+        || normalized.contains("access-key")
+        || normalized.contains("accesskey")
 }
 
 #[cfg(test)]
@@ -417,6 +468,30 @@ mod tests {
         let volumes = registry.list().await.unwrap();
         assert_eq!(volumes.len(), 1);
         assert_eq!(volumes[0].id, volume.id);
+    }
+
+    #[tokio::test]
+    async fn create_redacts_sensitive_query_values_in_response() {
+        let dir = tempdir().unwrap();
+        let registry = VolumeRegistry::new(dir.path().to_path_buf());
+        let mut request = create_request();
+        request.mount_config.meta_url = Some(
+            "s3://bucket/path?access_key_id=AKIA_TEST&secret_access_key=SECRET_TEST&session_token=TOKEN_TEST&endpoint=http://127.0.0.1:9000"
+                .into(),
+        );
+
+        let volume = registry.create(request).await.unwrap();
+
+        assert_eq!(
+            volume.mount_config.meta_url_redacted.as_deref(),
+            Some(
+                "s3://bucket/path?access_key_id=<redacted>&secret_access_key=<redacted>&session_token=<redacted>&endpoint=http://127.0.0.1:9000"
+            )
+        );
+        let response_json = serde_json::to_string(&volume).unwrap();
+        assert!(!response_json.contains("AKIA_TEST"));
+        assert!(!response_json.contains("SECRET_TEST"));
+        assert!(!response_json.contains("TOKEN_TEST"));
     }
 
     #[tokio::test]
