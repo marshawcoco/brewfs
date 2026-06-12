@@ -4,6 +4,7 @@ import {
   Check,
   Copy,
   Database,
+  Download,
   FileSearch,
   FolderTree,
   Gauge,
@@ -48,11 +49,13 @@ import {
 import { formatAclDraft, parseAclDraft } from './aclDraft';
 import { loadAclView, type AclViewResult } from './aclView';
 import {
+  browserMvpDataActions,
   formatBrowserEntryFlags,
   formatMode,
   joinBrowserPath,
   normalizeBrowserPath,
   parentBrowserPath,
+  showsBrowserDataActionsForKind,
 } from './browserPath';
 import {
   formatCsiItemCount,
@@ -1780,6 +1783,7 @@ function BrowserPage({
   }
 
   const currentPath = result?.path ?? normalizeBrowserPath(pathInput);
+  const dataActions = browserMvpDataActions();
 
   return (
     <>
@@ -1863,44 +1867,66 @@ function BrowserPage({
                 </tr>
               </thead>
               <tbody>
-                {result.entries.map((entry) => (
-                  <tr key={`${entry.inode}-${entry.name}`}>
-                    <td>{entry.name}</td>
-                    <td>{entry.kind}</td>
-                    <td>{entry.inode}</td>
-                    <td>{entry.size}</td>
-                    <td>{formatMode(entry.mode)}</td>
-                    <td>{formatBrowserEntryFlags(entry)}</td>
-                    <td>
-                      {entry.uid}:{entry.gid}
-                    </td>
-                    <td>{entry.mtime}</td>
-                    <td>
-                      <div className="table-actions">
-                        <button
-                          className="secondary-button compact-button"
-                          type="button"
-                          onClick={() => onInspect(joinBrowserPath(result.path, entry.name))}
-                          disabled={loading || metadataLoading}
-                        >
-                          <FileSearch size={14} aria-hidden="true" />
-                          <span>Inspect</span>
-                        </button>
-                        {entry.kind === 'directory' ? (
+                {result.entries.map((entry) => {
+                  const entryPath = joinBrowserPath(result.path, entry.name);
+                  return (
+                    <tr key={`${entry.inode}-${entry.name}`}>
+                      <td>{entry.name}</td>
+                      <td>{entry.kind}</td>
+                      <td>{entry.inode}</td>
+                      <td>{entry.size}</td>
+                      <td>{formatMode(entry.mode)}</td>
+                      <td>{formatBrowserEntryFlags(entry)}</td>
+                      <td>
+                        {entry.uid}:{entry.gid}
+                      </td>
+                      <td>{entry.mtime}</td>
+                      <td>
+                        <div className="table-actions">
                           <button
                             className="secondary-button compact-button"
                             type="button"
-                            onClick={() => onNavigate(joinBrowserPath(result.path, entry.name))}
+                            onClick={() => onInspect(entryPath)}
                             disabled={loading || metadataLoading}
                           >
-                            <FolderTree size={14} aria-hidden="true" />
-                            <span>Open</span>
+                            <FileSearch size={14} aria-hidden="true" />
+                            <span>Inspect</span>
                           </button>
-                        ) : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          {entry.kind === 'directory' ? (
+                            <button
+                              className="secondary-button compact-button"
+                              type="button"
+                              onClick={() => onNavigate(entryPath)}
+                              disabled={loading || metadataLoading}
+                            >
+                              <FolderTree size={14} aria-hidden="true" />
+                              <span>Open</span>
+                            </button>
+                          ) : null}
+                          {showsBrowserDataActionsForKind(entry.kind)
+                            ? dataActions.map((action) => {
+                                const DataActionIcon =
+                                  action.key === 'download' ? Download : Pencil;
+                                return (
+                                  <button
+                                    key={action.key}
+                                    className="secondary-button compact-button"
+                                    type="button"
+                                    disabled={!action.enabled}
+                                    title={action.reason}
+                                    aria-label={`${action.label}: ${action.reason}`}
+                                  >
+                                    <DataActionIcon size={14} aria-hidden="true" />
+                                    <span>{action.label}</span>
+                                  </button>
+                                );
+                              })
+                            : null}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -33,3 +33,31 @@ export function formatBrowserEntryFlags(entry: { has_acl?: boolean }): string {
   if (entry.has_acl) flags.push('ACL');
   return flags.length === 0 ? '-' : flags.join(', ');
 }
+
+export type BrowserMvpDataAction = {
+  key: 'download' | 'edit';
+  label: string;
+  enabled: false;
+  reason: string;
+};
+
+export function browserMvpDataActions(): BrowserMvpDataAction[] {
+  return [
+    {
+      key: 'download',
+      label: 'Download',
+      enabled: false,
+      reason: 'File downloads are outside the metadata-only console MVP.',
+    },
+    {
+      key: 'edit',
+      label: 'Edit',
+      enabled: false,
+      reason: 'File editing is outside the metadata-only console MVP.',
+    },
+  ];
+}
+
+export function showsBrowserDataActionsForKind(kind: string): boolean {
+  return kind === 'file' || kind === 'symlink';
+}
