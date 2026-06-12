@@ -1334,7 +1334,7 @@ where
     }
 
     // Remove a file
-    async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> FuseResult<()> {
+    async fn unlink(&self, req: Request, parent: u64, name: &OsStr) -> FuseResult<()> {
         debug!(parent, name = %name.to_string_lossy(), "fuse.unlink");
         let name = name.to_string_lossy();
         // Ensure parent directory exists and has the right type
@@ -1344,6 +1344,13 @@ where
         if !matches!(pattr.kind, VfsFileType::Dir) {
             return Err(libc::ENOTDIR.into());
         }
+        self.ensure_access_allowed(
+            parent as i64,
+            req.uid,
+            req.gid,
+            namespace_mutation_access_mask(),
+        )
+        .await?;
         // Target must exist and be a file
         let Some(child) = self.child_of(parent as i64, name.as_ref()).await else {
             return Err(libc::ENOENT.into());
@@ -1360,7 +1367,7 @@ where
     }
 
     // Remove an empty directory
-    async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> FuseResult<()> {
+    async fn rmdir(&self, req: Request, parent: u64, name: &OsStr) -> FuseResult<()> {
         debug!(parent, name = %name.to_string_lossy(), "fuse.rmdir");
         let name = name.to_string_lossy();
         let Some(pattr) = self.stat_ino(parent as i64).await else {
@@ -1369,6 +1376,13 @@ where
         if !matches!(pattr.kind, VfsFileType::Dir) {
             return Err(libc::ENOTDIR.into());
         }
+        self.ensure_access_allowed(
+            parent as i64,
+            req.uid,
+            req.gid,
+            namespace_mutation_access_mask(),
+        )
+        .await?;
         // Target must be a directory
         let Some(child) = self.child_of(parent as i64, name.as_ref()).await else {
             return Err(libc::ENOENT.into());
@@ -1978,6 +1992,10 @@ fn opendir_access_mask() -> u32 {
     libc::R_OK as u32
 }
 
+fn namespace_mutation_access_mask() -> u32 {
+    (libc::W_OK | libc::X_OK) as u32
+}
+
 fn access_mode_from_bits(attr: &VfsFileAttr, uid: u32, gid: u32) -> u32 {
     if uid == attr.uid {
         (attr.mode >> 6) & 0o7
@@ -2218,7 +2236,8 @@ fn attr_request_is_empty(req: &SetAttrRequest) -> bool {
 mod mode_sanitization_tests {
     use super::{
         access_mode_from_bits, acl_entries_access_mode, apply_creation_umask,
-        open_flags_access_mask, opendir_access_mask, sanitize_special_mode_bits,
+        namespace_mutation_access_mask, open_flags_access_mask, opendir_access_mask,
+        sanitize_special_mode_bits,
     };
     use crate::control::protocol::ControlAclEntry;
     use crate::vfs::fs::{FileAttr as VfsFileAttr, FileType as VfsFileType};
@@ -2339,6 +2358,14 @@ mod mode_sanitization_tests {
     #[test]
     fn opendir_requires_read_access() {
         assert_eq!(opendir_access_mask(), libc::R_OK as u32);
+    }
+
+    #[test]
+    fn namespace_mutations_require_write_and_execute_on_parent() {
+        assert_eq!(
+            namespace_mutation_access_mask(),
+            (libc::W_OK | libc::X_OK) as u32
+        );
     }
 
     fn acl_entry(scope: &str, tag: &str, id: Option<u32>, perm: &str) -> ControlAclEntry {
