@@ -596,7 +596,7 @@ where
 
     async fn write(
         &self,
-        _req: Request,
+        req: Request,
         ino: u64,
         fh: u64,
         offset: u64,
@@ -616,6 +616,10 @@ where
             write_flags,
             "fuse.write"
         );
+        if fh == 0 && !data.is_empty() {
+            self.ensure_access_allowed(ino as i64, req.uid, req.gid, inode_mutation_access_mask())
+                .await?;
+        }
         let n = if write_flags & FUSE_WRITE_CACHE != 0 {
             // Cached writes already contain the page data at the supplied
             // offset; applying O_APPEND again would duplicate the prefix.
@@ -628,7 +632,7 @@ where
                 "fuse.write -> write_ino (cache)"
             );
             let written = self
-                .write_cached_ino(ino as i64, offset, data, _req.unique)
+                .write_cached_ino(ino as i64, offset, data, req.unique)
                 .await
                 .map_err(Into::<Errno>::into)?;
             if fh != 0 && written > 0 {
@@ -753,6 +757,8 @@ where
                 attr,
             });
         }
+        self.ensure_access_allowed(ino as i64, req.uid, req.gid, inode_mutation_access_mask())
+            .await?;
 
         // Apply the attribute changes
         let vattr = match self.set_attr(ino as i64, &meta_req, meta_flags).await {
@@ -1513,7 +1519,7 @@ where
 
     async fn fallocate(
         &self,
-        _req: Request,
+        req: Request,
         inode: u64,
         fh: u64,
         offset: u64,
@@ -1523,6 +1529,15 @@ where
         debug!(inode, fh, offset, length, mode, "fuse.fallocate");
         if mode != 0 {
             return Err(libc::EOPNOTSUPP.into());
+        }
+        if length > 0 {
+            self.ensure_access_allowed(
+                inode as i64,
+                req.uid,
+                req.gid,
+                inode_mutation_access_mask(),
+            )
+            .await?;
         }
         self.fallocate_ino(inode as i64, offset, length)
             .await
@@ -2003,6 +2018,10 @@ fn open_flags_access_mask(flags: u32) -> u32 {
 
 fn opendir_access_mask() -> u32 {
     libc::R_OK as u32
+}
+
+fn inode_mutation_access_mask() -> u32 {
+    libc::W_OK as u32
 }
 
 fn namespace_mutation_access_mask() -> u32 {
@@ -2513,6 +2532,57 @@ mod fuse_init_tests {
         assert_eq!(err, Errno::from(libc::EACCES));
         assert!(fs.stat("/src/file.txt").await.is_ok());
         assert!(fs.stat("/dst/moved.txt").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn setattr_size_requires_write_access_on_inode() {
+        let fs = new_fuse_test_vfs().await;
+        fs.create_file("/file.txt").await.unwrap();
+        let attr = fs.stat("/file.txt").await.unwrap();
+
+        let err = Filesystem::setattr(
+            &fs,
+            user_request(),
+            attr.ino as u64,
+            None,
+            SetAttr {
+                size: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, Errno::from(libc::EACCES));
+        assert_eq!(fs.stat("/file.txt").await.unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    async fn stateless_write_requires_write_access_on_inode() {
+        let fs = new_fuse_test_vfs().await;
+        fs.create_file("/file.txt").await.unwrap();
+        let attr = fs.stat("/file.txt").await.unwrap();
+
+        let err = Filesystem::write(&fs, user_request(), attr.ino as u64, 0, 0, b"x", 0, 0)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, Errno::from(libc::EACCES));
+        assert_eq!(fs.stat("/file.txt").await.unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    async fn fallocate_requires_write_access_on_inode() {
+        let fs = new_fuse_test_vfs().await;
+        fs.create_file("/file.txt").await.unwrap();
+        let attr = fs.stat("/file.txt").await.unwrap();
+
+        let err = Filesystem::fallocate(&fs, user_request(), attr.ino as u64, 0, 0, 4096, 0)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, Errno::from(libc::EACCES));
+        assert_eq!(fs.stat("/file.txt").await.unwrap().size, 0);
     }
 
     #[test]
