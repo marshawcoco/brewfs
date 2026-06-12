@@ -307,6 +307,13 @@ impl SnapshotCsiAdapter {
             .collect()
     }
 
+    fn brewfs_storageclass_name_matches(&self, name: &str) -> bool {
+        self.snapshot
+            .storageclasses
+            .iter()
+            .any(|item| self.storageclass_matches(item) && resource_name(item) == Some(name))
+    }
+
     fn brewfs_pv_names(&self) -> Vec<String> {
         self.snapshot
             .persistentvolumes
@@ -392,6 +399,10 @@ impl SnapshotCsiAdapter {
             == Some(self.driver_name.as_str())
             || metadata_value(item, "annotations", "csi.brewfs.io/driver")
                 == Some(self.driver_name.as_str())
+            || item
+                .pointer("/spec/storageClassName")
+                .and_then(|value| value.as_str())
+                .is_some_and(|name| self.brewfs_storageclass_name_matches(name))
             || self.resource_has_brewfs_marker(item)
     }
 
@@ -750,6 +761,34 @@ mod tests {
                     .as_slice()
             ),
             vec!["reader"]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_adapter_discovers_pvs_by_brewfs_storageclass() {
+        let snapshot = CsiResourceSnapshot {
+            storageclasses: vec![json!({
+                "metadata": { "name": "brewfs-sc" },
+                "provisioner": DEFAULT_DRIVER_NAME
+            })],
+            persistentvolumes: vec![
+                json!({
+                    "metadata": { "name": "pv-from-brewfs-sc" },
+                    "spec": { "storageClassName": "brewfs-sc" }
+                }),
+                json!({
+                    "metadata": { "name": "pv-other" },
+                    "spec": { "storageClassName": "other-sc" }
+                }),
+            ],
+            persistentvolumeclaims: Vec::new(),
+            pods: Vec::new(),
+        };
+        let adapter = SnapshotCsiAdapter::new(DEFAULT_DRIVER_NAME, snapshot);
+
+        assert_eq!(
+            resource_names(adapter.persistentvolumes().await.unwrap().items.as_slice()),
+            vec!["pv-from-brewfs-sc"]
         );
     }
 
