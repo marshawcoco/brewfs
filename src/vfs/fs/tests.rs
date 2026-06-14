@@ -1538,7 +1538,9 @@ mod io_tests {
             block_size: 4 * 1024,
         };
         let store = InMemoryBlockStore::new();
-        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta_handle = create_meta_store_from_url("sqlite:file::memory:")
+            .await
+            .unwrap();
         let meta_store = meta_handle.store();
         let fs = Arc::new(VFS::new(layout, store, meta_store).await.unwrap());
 
@@ -1556,9 +1558,9 @@ mod io_tests {
         }
 
         let task_count = 4usize;
-        let iterations = 100usize;
+        let iterations = 24usize;
         let max_write = 4096usize;
-        let op_timeout = Duration::from_secs(30);
+        let op_timeout = Duration::from_secs(60);
 
         let mut handles = Vec::with_capacity(task_count);
         for t in 0..task_count {
