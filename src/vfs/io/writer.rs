@@ -5295,26 +5295,42 @@ mod tests {
             .expect("commit-before-upload flush should return while object upload is blocked")
             .unwrap();
 
-        let blocked = {
-            let file_writer = file_writer.clone();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if writer.recent_pending_upload_bytes() >= layout.block_size as u64 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("blocked upload should be counted before testing backpressure");
+
+        let unblocked = Arc::new(AtomicBool::new(false));
+        let unblock_task = {
+            let store = store.clone();
+            let unblocked = unblocked.clone();
             tokio::spawn(async move {
-                file_writer
-                    .write_at(layout.block_size as u64, &vec![2u8; 512])
-                    .await
+                sleep(Duration::from_millis(50)).await;
+                unblocked.store(true, Ordering::Release);
+                store.unblock();
             })
         };
-
-        sleep(Duration::from_millis(50)).await;
+        let second_write = vec![2u8; 512];
+        timeout(
+            Duration::from_secs(2),
+            file_writer.write_at(layout.block_size as u64, &second_write),
+        )
+        .await
+        .expect("write should wake after pending-upload backlog drains")
+        .unwrap();
         assert!(
-            !blocked.is_finished(),
-            "write should wait while pending-upload backlog is at the configured limit"
+            unblocked.load(Ordering::Acquire),
+            "write completed before pending-upload backlog was drained"
         );
-
-        store.unblock();
-        timeout(Duration::from_secs(2), blocked)
+        timeout(Duration::from_secs(2), unblock_task)
             .await
-            .expect("write should wake after pending-upload backlog drains")
-            .unwrap()
+            .expect("unblock task should finish")
             .unwrap();
 
         let breakdown = writer.dirty_breakdown().await;
