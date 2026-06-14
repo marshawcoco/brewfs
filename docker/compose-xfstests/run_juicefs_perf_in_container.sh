@@ -43,7 +43,7 @@ env_or_default() {
 }
 
 prepare_artifacts() {
-    mkdir -p "$artifact_dir/results" "$artifact_dir/tools"
+    mkdir -p "$artifact_dir/results" "$artifact_dir/tools" "$artifact_dir/diagnostics"
     printf 'tool\tstatus\tseconds\tlog\n' >"$artifact_dir/perf-summary.tsv"
     write_juicefs_profile
 }
@@ -207,6 +207,105 @@ clear_juicefs_cache_if_requested() {
             err "跳过 JuiceFS cache dir 清理，路径不安全: ${root:-<empty>}"
         fi
     fi
+}
+
+juicefs_stats_path() {
+    if [[ -e "$mount_dir/.jfs.stats" ]]; then
+        printf '%s/.jfs.stats' "$mount_dir"
+    elif [[ -e "$mount_dir/.stats" ]]; then
+        printf '%s/.stats' "$mount_dir"
+    else
+        return 1
+    fi
+}
+
+stats_snapshot_after_tool() {
+    local tool="$1"
+    local stats_path
+    {
+        date -Iseconds
+        echo
+        if stats_path="$(juicefs_stats_path 2>/dev/null)"; then
+            tr -d '\000' <"$stats_path"
+        else
+            echo "missing JuiceFS stats file under $mount_dir"
+        fi
+    } >"$artifact_dir/diagnostics/juicefs-stats-${tool}-after.txt" 2>&1 || true
+}
+
+juicefs_stat_value() {
+    local metric="$1"
+    local stats_path
+    stats_path="$(juicefs_stats_path)" || return 1
+
+    tr -d '\000' <"$stats_path" | awk -v metric="$metric" '
+        NF >= 2 {
+            name = $1
+            sub(/\{.*/, "", name)
+            if (name == metric && $2 ~ /^[-+]?[0-9.]+([eE][-+]?[0-9]+)?$/) {
+                sum += $2
+                found = 1
+            }
+        }
+        END {
+            if (found) {
+                printf "%.0f\n", sum
+            } else {
+                exit 1
+            }
+        }
+    '
+}
+
+numeric_juicefs_stat_or_zero() {
+    local metric="$1"
+    local value
+    value="$(juicefs_stat_value "$metric" 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$value"
+    else
+        printf '0'
+    fi
+}
+
+wait_for_fio_prefill_drain() {
+    local tool="$1"
+    local timeout="${PERF_FIO_PREFILL_DRAIN_TIMEOUT_SECS:-600}"
+    local interval="${PERF_FIO_PREFILL_DRAIN_INTERVAL_SECS:-2}"
+    local threshold="${PERF_FIO_PREFILL_DRAIN_PENDING_BYTES:-0}"
+    local start now elapsed staged_blocks staged_bytes uploading put_bytes get_bytes
+
+    info "等待 JuiceFS fio 预填充写回完成: $tool (stage_bytes<=${threshold}, timeout=${timeout}s)"
+    sync || true
+    start="$(date +%s)"
+
+    while true; do
+        staged_blocks="$(numeric_juicefs_stat_or_zero juicefs_staging_blocks)"
+        staged_bytes="$(numeric_juicefs_stat_or_zero juicefs_staging_block_bytes)"
+        uploading="$(numeric_juicefs_stat_or_zero juicefs_object_request_uploading)"
+        put_bytes="$(numeric_juicefs_stat_or_zero juicefs_object_request_data_bytes_PUT)"
+        get_bytes="$(numeric_juicefs_stat_or_zero juicefs_object_request_data_bytes_GET)"
+
+        now="$(date +%s)"
+        elapsed="$((now - start))"
+
+        if (( staged_bytes <= threshold && staged_blocks == 0 && uploading == 0 )); then
+            ok "JuiceFS 预填充写回已完成: $tool (stage_blocks=$staged_blocks stage_bytes=$staged_bytes uploading=$uploading put_bytes=$put_bytes get_bytes=$get_bytes elapsed=${elapsed}s)"
+            stats_snapshot_after_tool "${tool}-prefill-drained"
+            return 0
+        fi
+
+        if (( elapsed >= timeout )); then
+            err "JuiceFS 预填充写回等待超时: $tool (stage_blocks=$staged_blocks stage_bytes=$staged_bytes uploading=$uploading put_bytes=$put_bytes get_bytes=$get_bytes elapsed=${elapsed}s)"
+            stats_snapshot_after_tool "${tool}-prefill-drain-timeout"
+            return 1
+        fi
+
+        if (( elapsed % 10 == 0 )); then
+            info "  JuiceFS 写回等待中: stage_blocks=$staged_blocks stage_bytes=$staged_bytes uploading=$uploading put_bytes=$put_bytes get_bytes=$get_bytes elapsed=${elapsed}s"
+        fi
+        sleep "$interval"
+    done
 }
 
 remount_juicefs_for_fio_profile() {
@@ -598,12 +697,12 @@ run_fio_profile() {
 
     if [[ "$needs_prefill" == true ]]; then
         prepare_fio_dataset "$tool" "$work_dir" "$name" "$size" "$direct" "$numjobs" "$bs" "$ioengine" "$iodepth" || return $?
+        stats_snapshot_after_tool "${tool}-prefill"
         if truthy "${PERF_FIO_COLD_READ:-false}" || truthy "${PERF_FIO_PREFILL_DRAIN:-false}"; then
-            info "同步 fio 预填充数据集: $tool"
-            sync
+            wait_for_fio_prefill_drain "$tool" || return $?
         fi
         if truthy "${PERF_FIO_COLD_READ:-false}" || truthy "${PERF_FIO_PREFILL_REMOUNT:-false}"; then
-            remount_juicefs_for_fio_profile "$tool"
+            remount_juicefs_for_fio_profile "$tool" || return $?
         fi
     fi
 

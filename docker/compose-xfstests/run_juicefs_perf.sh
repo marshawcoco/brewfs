@@ -23,7 +23,7 @@ usage() {
 
 选项:
   --writeback-throughput-profile
-                             启用 JuiceFS 对齐吞吐 profile（writeback, buffer=8192MiB, cache=4096MiB, upload/download concurrency=4/16, open-cache=1s/65536, compression=none, backup-meta=0, fio prefill sync+remount）
+                             启用 JuiceFS 对齐吞吐 profile（writeback, buffer=8192MiB, cache=4096MiB, upload/download concurrency=4/16, open-cache=1s/65536, compression=none, backup-meta=0, fio prefill staging drain+remount）
   --tools "<tool...>"        指定压力工具列表，默认: "fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw dirstress dirperf metaperf looptest"
   --keep                     结束后不执行 compose down（便于调试）
   -h, --help                 显示帮助
@@ -36,7 +36,8 @@ usage() {
   PERF_STRESS_NG_ARGS 可完全覆盖默认 stress-ng 参数；如需 link/symlink stressor 请用该变量显式指定
   PERF_FIO_ARGS PERF_FIO_RUNTIME PERF_FIO_SIZE PERF_FIO_BS PERF_FIO_NUMJOBS
   PERF_FIO_{SEQREAD,SEQWRITE,RANDREAD,RANDWRITE,RANDRW,BIGREAD,BIGWRITE}_{ARGS,BS,SIZE,NUMJOBS,IOENGINE,IODEPTH,DIRECT,RUNTIME}
-  PERF_FIO_COLD_READ PERF_FIO_PREFILL_DRAIN PERF_FIO_PREFILL_REMOUNT PERF_FIO_DROP_CACHES PERF_FIO_COLD_READ_DROP_CACHES PERF_FIO_COLD_READ_CLEAR_CACHE
+  PERF_FIO_COLD_READ PERF_FIO_PREFILL_DRAIN PERF_FIO_PREFILL_REMOUNT PERF_FIO_PREFILL_DRAIN_TIMEOUT_SECS PERF_FIO_PREFILL_DRAIN_INTERVAL_SECS PERF_FIO_PREFILL_DRAIN_PENDING_BYTES
+  PERF_FIO_DROP_CACHES PERF_FIO_COLD_READ_DROP_CACHES PERF_FIO_COLD_READ_CLEAR_CACHE
   JFS_COMPRESS JFS_WRITEBACK JFS_BUFFER_SIZE_MIB JFS_CACHE_SIZE_MIB JFS_MAX_UPLOADS JFS_MAX_DOWNLOADS
   JFS_OPEN_CACHE JFS_OPEN_CACHE_LIMIT JFS_BACKUP_META JFS_NO_USAGE_REPORT JFS_CACHE_DIR
   PERF_LOG_TO_CONSOLE=true 可恢复压测工具日志输出到终端（默认关闭）
@@ -250,6 +251,9 @@ docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
     -e PERF_FIO_COLD_READ \
     -e PERF_FIO_PREFILL_DRAIN \
     -e PERF_FIO_PREFILL_REMOUNT \
+    -e PERF_FIO_PREFILL_DRAIN_TIMEOUT_SECS \
+    -e PERF_FIO_PREFILL_DRAIN_INTERVAL_SECS \
+    -e PERF_FIO_PREFILL_DRAIN_PENDING_BYTES \
     -e PERF_FIO_DROP_CACHES \
     -e PERF_FIO_COLD_READ_DROP_CACHES \
     -e PERF_FIO_COLD_READ_CLEAR_CACHE \
