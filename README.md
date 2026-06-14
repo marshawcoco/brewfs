@@ -236,25 +236,23 @@ PERF_FIO_DIRECT=1 PERF_FIO_RUNTIME=20 PERF_FIO_SIZE=512m \
 Artifacts:
 
 - BrewFS: `docker/compose-xfstests/artifacts/perf-run-1781450598-12940`
-- JuiceFS full run: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781451380-31093`
-- JuiceFS random-read rerun after writeback drain fix: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781453384-21925`
-- JuiceFS randrw rerun after writeback drain fix: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781452968-29476`
+- JuiceFS: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781453759-18759`
 
 | Workload | BrewFS | JuiceFS | Comparison |
 | --- | --- | --- | --- |
-| `fio-bigwrite` | pass; W 183.04 MiB/s; W p99 18.743 ms; wall 23s | pass; W 3.59 GiB/s; W p99 0.010 ms; wall 1s | BrewFS is about 0.05x JuiceFS foreground write bandwidth. |
-| `fio-bigread` | pass; R 1.00 GiB/s; R p99 0.114 ms; wall 5s | pass; R 2.77 GiB/s; R p99 0.070 ms; wall 2s | BrewFS is about 0.36x JuiceFS big-read bandwidth. |
-| `fio-seqread` | pass; R 3.37 GiB/s; R p99 0.005 ms; wall 20s | pass; R 3.47 GiB/s; R p99 0.002 ms; wall 21s | Sequential read is near parity, about 0.97x JuiceFS. |
-| `fio-seqwrite` | pass; W 89.28 MiB/s; W p99 27.132 ms; wall 52s | pass; W 591.70 MiB/s; W p99 0.006 ms; wall 74s | BrewFS is about 0.15x JuiceFS sequential-write bandwidth. |
-| `fio-randread` | pass; R 3.56 GiB/s; R p99 0.012 ms; wall 20s | pass; R 3.87 GiB/s; R p99 0.017 ms; wall 20s | BrewFS is about 0.92x JuiceFS random-read bandwidth. |
-| `fio-randwrite` | pass; W 67.16 MiB/s; W p99 87.556 ms; wall 130s | pass; W 668.70 MiB/s; W p99 0.007 ms; wall 78s | BrewFS is about 0.10x JuiceFS random-write bandwidth. |
-| `fio-randrw` | pass; R 125.44 MiB/s, W 55.32 MiB/s; R/W p99 0.008/87.556 ms; wall 144s | pass; R 250.88 MiB/s, W 114.57 MiB/s; R/W p99 0.059/0.049 ms; wall 20s | BrewFS is about 0.50x/0.48x JuiceFS mixed random read/write bandwidth. |
+| `fio-bigwrite` | pass; W 183.04 MiB/s; W p99 18.743 ms; wall 23s | pass; W 3.52 GiB/s; W p99 0.018 ms; wall 2s | BrewFS is about 0.05x JuiceFS foreground write bandwidth. |
+| `fio-bigread` | pass; R 1.00 GiB/s; R p99 0.114 ms; wall 5s | pass; R 552.92 MiB/s; R p99 0.017 ms; wall 8s | BrewFS is about 1.85x JuiceFS big-read bandwidth in this run. |
+| `fio-seqread` | pass; R 3.37 GiB/s; R p99 0.005 ms; wall 20s | pass; R 3.47 GiB/s; R p99 0.002 ms; wall 20s | Sequential read is near parity, about 0.97x JuiceFS. |
+| `fio-seqwrite` | pass; W 89.28 MiB/s; W p99 27.132 ms; wall 52s | pass; W 582.63 MiB/s; W p99 0.006 ms; wall 76s | BrewFS is about 0.15x JuiceFS sequential-write bandwidth. |
+| `fio-randread` | pass; R 3.56 GiB/s; R p99 0.012 ms; wall 20s | pass; R 4.03 GiB/s; R p99 0.013 ms; wall 21s | BrewFS is about 0.88x JuiceFS random-read bandwidth. |
+| `fio-randwrite` | pass; W 67.16 MiB/s; W p99 87.556 ms; wall 130s | pass; W 642.69 MiB/s; W p99 0.012 ms; wall 74s | BrewFS is about 0.10x JuiceFS random-write bandwidth. |
+| `fio-randrw` | pass; R 125.44 MiB/s, W 55.32 MiB/s; R/W p99 0.008/87.556 ms; wall 144s | pass; R 236.71 MiB/s, W 109.68 MiB/s; R/W p99 0.023/0.055 ms; wall 21s | BrewFS is about 0.53x/0.50x JuiceFS mixed random read/write bandwidth. |
 
 Interpretation:
 
 - `PERF_FIO_DIRECT=1` reduces Linux page-cache effects, but BrewFS read rows still show high internal cache hit rates in the generated report. Treat read bandwidth as a cache-aware regression signal, not a cold-object-store maximum.
 - JuiceFS writeback completes foreground writes much faster in this profile. BrewFS still pays a large writeback/upload tail in random-write and mixed random-read/write workloads, which is the main remaining gap shown by this snapshot.
-- Older JuiceFS `fio-randread` and `fio-randrw` rows failed with FIO read `Input/output error` because the perf runner cleared the local writeback cache after `sync` but before JuiceFS staging upload drained. The runner now waits for JuiceFS staging counters to reach zero before remounting and clearing cache, and the fixed rerun records both workloads as pass.
+- Older JuiceFS `fio-randread` and `fio-randrw` rows failed with FIO read `Input/output error` because the perf runner cleared the local writeback cache after `sync` but before JuiceFS staging upload drained. The runner now waits for JuiceFS staging counters to reach zero before remounting and clearing cache, and the latest full JuiceFS run records all seven workloads as pass.
 
 ## Feature Flags
 
