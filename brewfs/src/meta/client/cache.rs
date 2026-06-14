@@ -328,6 +328,14 @@ impl InodeCache {
         Some(node.attr.read().await.clone())
     }
 
+    pub(crate) async fn refresh_attr(&self, ino: i64, attr: FileAttr) -> bool {
+        let Some(node) = self.ttl_manager.get(&ino).await else {
+            return false;
+        };
+        *node.attr.write().await = attr;
+        true
+    }
+
     pub(crate) async fn get_node(&self, ino: i64) -> Option<Arc<InodeEntry>> {
         self.ttl_manager.get(&ino).await
     }

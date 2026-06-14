@@ -10,6 +10,7 @@ use crate::meta::file_lock::{FileLockInfo, FileLockQuery, FileLockRange, FileLoc
 use crate::meta::store::{
     AclRule, MetaError, MetaStore, SetAttrFlags, SetAttrRequest, StatFsSnapshot,
 };
+use crate::posix::NAME_MAX;
 use dashmap::{DashMap, Entry};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -726,6 +727,20 @@ where
     S: BlockStore + Send + Sync + 'static,
     M: MetaLayer + Send + Sync + 'static,
 {
+    fn validate_entry_name(name: &str) -> Result<(), VfsError> {
+        if name.is_empty() || name.contains('/') || name.contains('\0') {
+            return Err(VfsError::InvalidFilename);
+        }
+
+        if name.len() > NAME_MAX {
+            return Err(VfsError::FilenameTooLong {
+                path: PathHint::none(),
+            });
+        }
+
+        Ok(())
+    }
+
     fn from_components_with_background(
         config: VFSConfig,
         store: Arc<S>,
@@ -1070,12 +1085,14 @@ where
     }
 
     /// get the node's child inode and attributes by name.
-    pub(crate) async fn child_attr_of(&self, parent: i64, name: &str) -> Option<(i64, FileAttr)> {
-        let (ino, mut attr) = self
-            .meta_lookup_with_attr(parent, name)
-            .await
-            .ok()
-            .flatten()?;
+    pub(crate) async fn child_attr_of(
+        &self,
+        parent: i64,
+        name: &str,
+    ) -> Result<Option<(i64, FileAttr)>, VfsError> {
+        let Some((ino, mut attr)) = self.meta_lookup_with_attr(parent, name).await? else {
+            return Ok(None);
+        };
 
         // close-to-open semantics: if there is a local state, it should be considered as the newest state.
         if let Some(size) = self.inode_size_cached(ino) {
@@ -1083,7 +1100,7 @@ where
         }
 
         tracing::debug!(ino, nlink = attr.nlink, kind = ?attr.kind, "child_attr_of");
-        Some((ino, attr))
+        Ok(Some((ino, attr)))
     }
 
     #[tracing::instrument(level = "trace", skip(self), fields(ino))]
@@ -1308,9 +1325,7 @@ where
         parent_ino: i64,
         name: &str,
     ) -> Result<FileAttr, VfsError> {
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(name)?;
 
         let attr = self.meta_link(src_ino, parent_ino, name).await?;
 
@@ -1325,9 +1340,7 @@ where
         name: &str,
         existing_dir_ok: bool,
     ) -> Result<i64, VfsError> {
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(name)?;
 
         match self.meta_mkdir(parent_ino, name.to_string()).await {
             Ok(ino) => Ok(ino),
@@ -1386,9 +1399,7 @@ where
             &self.stats().vfs_create_total_ops,
             &self.stats().vfs_create_total_lat_us,
         );
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(name)?;
 
         let create_result = {
             let _meta_timer = self.vfs_timing_timer(
@@ -1442,9 +1453,7 @@ where
         name: &str,
         target: &str,
     ) -> Result<(i64, FileAttr), VfsError> {
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(name)?;
 
         let parent_attr = self
             .meta_stat_required(parent_ino, PathHint::none())
@@ -1472,9 +1481,7 @@ where
             &self.stats().vfs_unlink_total_ops,
             &self.stats().vfs_unlink_total_lat_us,
         );
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(name)?;
 
         let ino = {
             let _lookup_timer = self.vfs_timing_timer(
@@ -1517,9 +1524,7 @@ where
     /// Remove an empty directory using parent inode and name directly.
     #[tracing::instrument(level = "debug", skip(self), fields(parent_ino, name))]
     pub(crate) async fn rmdir_at(&self, parent_ino: i64, name: &str) -> Result<(), VfsError> {
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(name)?;
 
         let ino = self
             .meta_lookup_required(parent_ino, name, PathHint::none())
@@ -1570,15 +1575,8 @@ where
         new_parent_ino: i64,
         new_name: &str,
     ) -> Result<(), VfsError> {
-        if old_name.is_empty()
-            || new_name.is_empty()
-            || old_name.contains('/')
-            || old_name.contains('\0')
-            || new_name.contains('/')
-            || new_name.contains('\0')
-        {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(old_name)?;
+        Self::validate_entry_name(new_name)?;
 
         if old_parent_ino == new_parent_ino && old_name == new_name {
             return Ok(());

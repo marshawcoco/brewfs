@@ -482,8 +482,12 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
     }
 
     fn validate_entry_name(name: &str) -> Result<(), MetaError> {
-        if name.is_empty() || name.len() > NAME_MAX {
+        if name.is_empty() {
             return Err(MetaError::InvalidFilename);
+        }
+
+        if name.len() > NAME_MAX {
+            return Err(MetaError::FilenameTooLong);
         }
 
         if name.contains('/') || name.contains('\0') {
@@ -1090,6 +1094,7 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
     /// * `Err(MetaError)` - On storage errors
     #[tracing::instrument(level = "trace", skip(self), fields(parent, name))]
     async fn cached_lookup(&self, parent: i64, name: &str) -> Result<Option<i64>, MetaError> {
+        Self::validate_entry_name(name)?;
         let parent = self.check_root(parent);
 
         if let Some(result) = self.inode_cache.lookup_if_loaded(parent, name).await {
@@ -1146,12 +1151,34 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
             .await;
     }
 
+    async fn refresh_cached_attr_after_namespace_mutation(&self, ino: i64) {
+        if self.inode_cache.get_node(ino).await.is_none() {
+            return;
+        }
+
+        match self.store.stat(ino).await {
+            Ok(Some(attr)) => {
+                self.inode_cache.refresh_attr(ino, attr).await;
+            }
+            Ok(None) => {
+                self.inode_cache.invalidate_inode(ino).await;
+            }
+            Err(err) => {
+                warn!(
+                    "MetaClient: failed to refresh cached inode {} after namespace mutation: {}",
+                    ino, err
+                );
+            }
+        }
+    }
+
     #[tracing::instrument(level = "trace", skip(self), fields(parent, name))]
     async fn cached_lookup_with_attr(
         &self,
         parent: i64,
         name: &str,
     ) -> Result<Option<(i64, FileAttr)>, MetaError> {
+        Self::validate_entry_name(name)?;
         let parent = self.check_root(parent);
 
         if let Some(result) = self.inode_cache.lookup_if_loaded(parent, name).await {
@@ -1667,6 +1694,8 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
             self.inode_cache.mark_children_complete_empty(ino).await;
         }
         self.inode_cache.add_child(parent, name, ino).await;
+        self.refresh_cached_attr_after_namespace_mutation(parent)
+            .await;
 
         self.invalidate_parent_path(parent).await;
 
@@ -1676,6 +1705,7 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
     #[tracing::instrument(level = "trace", skip(self), fields(parent, name))]
     async fn rmdir(&self, parent: i64, name: &str) -> Result<(), MetaError> {
         self.ensure_writable()?;
+        Self::validate_entry_name(name)?;
         let parent = self.check_root(parent);
         info!("MetaClient: rmdir operation for ({}, '{}')", parent, name);
 
@@ -1694,6 +1724,8 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
             child_node.attr.write().await.nlink = 0;
             child_node.clear_parent().await;
         }
+        self.refresh_cached_attr_after_namespace_mutation(parent)
+            .await;
         self.invalidate_parent_path(parent).await;
 
         Ok(())
@@ -1702,6 +1734,7 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
     #[tracing::instrument(level = "trace", skip(self), fields(parent, name))]
     async fn create_file(&self, parent: i64, name: String) -> Result<i64, MetaError> {
         self.ensure_writable()?;
+        Self::validate_entry_name(&name)?;
         let parent = self.check_root(parent);
         info!(
             "MetaClient: create_file operation for ({}, '{}')",
@@ -1720,6 +1753,8 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
             self.inode_cache.insert_node(ino, attr, cache_parent).await;
         }
         self.inode_cache.add_child(parent, name, ino).await;
+        self.refresh_cached_attr_after_namespace_mutation(parent)
+            .await;
 
         self.invalidate_parent_path(parent).await;
 
@@ -1750,6 +1785,8 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
             .await;
         self.inode_cache
             .add_child(parent, name.to_string(), inode)
+            .await;
+        self.refresh_cached_attr_after_namespace_mutation(parent)
             .await;
 
         self.invalidate_parent_path(parent).await;
@@ -1792,6 +1829,8 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
         self.inode_cache
             .add_child(parent, name.to_string(), ino)
             .await;
+        self.refresh_cached_attr_after_namespace_mutation(parent)
+            .await;
 
         self.invalidate_parent_path(parent).await;
 
@@ -1817,6 +1856,8 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
         if let Some(ino) = target_ino {
             self.invalidate_open_file_cache_inode(ino).await;
         }
+        self.refresh_cached_attr_after_namespace_mutation(parent)
+            .await;
         self.invalidate_parent_path(parent).await;
 
         Ok(())
@@ -1839,6 +1880,9 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
         let old_parent = self.check_root(old_parent);
         let new_parent = self.check_root(new_parent);
 
+        Self::validate_entry_name(old_name)?;
+        Self::validate_entry_name(&new_name)?;
+
         // Fast path: if renaming to same location, return success (POSIX no-op)
         if old_parent == new_parent && old_name == new_name {
             return Ok(());
@@ -1856,9 +1900,6 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
 
         // Validate new parent exists and is a directory
         self.ensure_directory_exists(new_parent).await?;
-
-        // Validate name constraints
-        Self::validate_entry_name(&new_name)?;
 
         // Resolve destination inode before store rename so we can invalidate its
         // cache entry afterwards.  When the store replaces an existing destination,

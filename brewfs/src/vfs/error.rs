@@ -186,6 +186,7 @@ impl VfsError {
             MetaError::NotDirectory(_) => VfsError::NotADirectory { path },
             MetaError::DirectoryNotEmpty(_) => VfsError::DirectoryNotEmpty { path },
             MetaError::InvalidFilename => VfsError::InvalidFilename,
+            MetaError::FilenameTooLong => VfsError::FilenameTooLong { path },
             MetaError::InvalidPath(_) => VfsError::InvalidInput,
             MetaError::TooManySymlinks => VfsError::InvalidInput,
             MetaError::NotSupported(_) | MetaError::NotImplemented => VfsError::Unsupported,

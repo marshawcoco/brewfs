@@ -346,6 +346,9 @@ pub enum MetaError {
     #[error("Invalid filename")]
     InvalidFilename,
 
+    #[error("Filename too long")]
+    FilenameTooLong,
+
     #[error(
         "More than max_symlinks symbolic links were encountered during resolution of the path."
     )]

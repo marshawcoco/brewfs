@@ -429,7 +429,8 @@ where
         );
 
         let name_str = name.to_string_lossy();
-        let Some((_child_ino, vattr)) = self.child_attr_of(parent as i64, name_str.as_ref()).await
+        let Some((_child_ino, vattr)) =
+            self.child_attr_of(parent as i64, name_str.as_ref()).await?
         else {
             info!(parent, name = %name_str, "fuse.lookup ENOENT");
             return Err(libc::ENOENT.into());
@@ -1265,6 +1266,7 @@ where
                 VfsError::NotADirectory { .. } => Errno::from(libc::ENOTDIR),
                 VfsError::TooManyLinks => Errno::from(libc::EMLINK),
                 VfsError::InvalidFilename => Errno::from(libc::EINVAL),
+                VfsError::FilenameTooLong { .. } => Errno::from(libc::ENAMETOOLONG),
                 other => {
                     info!(ino, new_parent, new_name = %new_name_str, error = %other, "fuse.link err");
                     Errno::from(libc::EIO)
@@ -1450,6 +1452,7 @@ where
                     VfsError::CircularRename { .. } => libc::EINVAL,
                     VfsError::InvalidRenameTarget { .. } => libc::EINVAL,
                     VfsError::CrossesDevices => libc::EXDEV,
+                    VfsError::FilenameTooLong { .. } => libc::ENAMETOOLONG,
                     other => {
                         warn!(error = ?other, parent, %name, new_parent, %new_name, "unhandled VFS error during rename, mapped to EIO");
                         libc::EIO
@@ -1936,6 +1939,8 @@ impl From<MetaError> for Errno {
             MetaError::LockConflict { .. } => libc::EAGAIN,
             MetaError::NotSupported(_) | MetaError::NotImplemented => libc::ENOSYS,
             MetaError::InvalidPath(_) => libc::EINVAL,
+            MetaError::InvalidFilename => libc::EINVAL,
+            MetaError::FilenameTooLong => libc::ENAMETOOLONG,
             _ => libc::EIO,
         };
         Errno::from(code)
@@ -1977,6 +1982,7 @@ impl From<VfsError> for Errno {
             VfsError::CrossesDevices => libc::EXDEV,
             VfsError::TooManyLinks => libc::EMLINK,
             VfsError::InvalidFilename => libc::EINVAL,
+            VfsError::FilenameTooLong { .. } => libc::ENAMETOOLONG,
             VfsError::ArgumentListTooLong => libc::E2BIG,
             VfsError::Interrupted => libc::EINTR,
             VfsError::Unsupported => libc::ENOSYS,

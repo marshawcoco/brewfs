@@ -5,6 +5,7 @@ use crate::chunk::layout::ChunkLayout;
 use crate::chunk::store::InMemoryBlockStore;
 use crate::meta::MetaLayer;
 use crate::meta::factory::create_meta_store_from_url;
+use crate::posix::NAME_MAX;
 use crate::vfs::fs::VFS;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,11 +92,28 @@ async fn test_child_attr_of_returns_child_inode_and_attr() {
     let (found, attr) = fs
         .child_attr_of(root, "lookup_attr_vfs.txt")
         .await
+        .expect("child_attr_of should not fail")
         .expect("child_attr_of should return the created child");
 
     assert_eq!(found, ino);
     assert_eq!(attr.ino, ino);
     assert_eq!(attr.kind, super::FileType::File);
+}
+
+#[tokio::test]
+async fn test_child_attr_of_rejects_name_longer_than_name_max() {
+    let layout = ChunkLayout::default();
+    let store = InMemoryBlockStore::new();
+    let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+    let meta_store = meta_handle.store();
+    let fs = VFS::new(layout, store, meta_store).await.unwrap();
+    let root = fs.root_ino();
+    let long_name = "x".repeat(NAME_MAX + 1);
+
+    assert!(matches!(
+        fs.child_attr_of(root, &long_name).await,
+        Err(crate::vfs::error::VfsError::FilenameTooLong { .. })
+    ));
 }
 
 #[cfg(test)]
