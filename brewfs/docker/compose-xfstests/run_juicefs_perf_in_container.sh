@@ -289,6 +289,43 @@ run_looptest() {
     run_logged_tool looptest "$bin" "${args[@]}"
 }
 
+run_stress_ng() {
+    local work_dir="$mount_dir/.perf-stress-ng"
+    local -a args=()
+
+    if ! command -v stress-ng >/dev/null 2>&1; then
+        err "缺少 stress-ng"
+        return 1
+    fi
+
+    rm -rf "$work_dir"
+    mkdir -p "$work_dir"
+
+    if [[ -n "${PERF_STRESS_NG_ARGS:-}" ]]; then
+        read -r -a args <<<"${PERF_STRESS_NG_ARGS}"
+    else
+        args=(
+            --temp-path "$work_dir"
+            --timeout "${PERF_STRESS_NG_TIMEOUT:-10s}"
+            --metrics-brief
+            --verify
+            --dir "${PERF_STRESS_NG_DIR_WORKERS:-1}"
+            --dir-ops "${PERF_STRESS_NG_DIR_OPS:-1000}"
+            --dentry "${PERF_STRESS_NG_DENTRY_WORKERS:-1}"
+            --dentry-ops "${PERF_STRESS_NG_DENTRY_OPS:-100}"
+            --rename "${PERF_STRESS_NG_RENAME_WORKERS:-1}"
+            --rename-ops "${PERF_STRESS_NG_RENAME_OPS:-1000}"
+            --unlink "${PERF_STRESS_NG_UNLINK_WORKERS:-1}"
+            --unlink-ops "${PERF_STRESS_NG_UNLINK_OPS:-500}"
+            --hdd "${PERF_STRESS_NG_HDD_WORKERS:-1}"
+            --hdd-bytes "${PERF_STRESS_NG_HDD_BYTES:-8M}"
+            --hdd-write-size "${PERF_STRESS_NG_HDD_WRITE_SIZE:-128K}"
+        )
+    fi
+
+    run_logged_tool stress-ng stress-ng "${args[@]}"
+}
+
 prepare_fio_dataset() {
     local tool="$1"
     local work_dir="$2"
@@ -571,6 +608,7 @@ run_perf_suite() {
             dirperf)      run_dirperf || status=1 ;;
             metaperf)     run_metaperf || status=1 ;;
             looptest)     run_looptest || status=1 ;;
+            stress-ng)    run_stress_ng || status=1 ;;
             fio)          run_fio_custom || status=1 ;;
             fio-seqread)  run_fio_profile "$tool" seqread || status=1 ;;
             fio-seqwrite) run_fio_profile "$tool" seqwrite || status=1 ;;

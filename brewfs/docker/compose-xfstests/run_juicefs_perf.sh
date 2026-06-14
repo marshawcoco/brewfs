@@ -29,10 +29,11 @@ usage() {
   -h, --help                 显示帮助
 
 支持的 PERF_TOOLS:
-  fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw fio dirstress dirperf metaperf looptest
+  fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw fio dirstress dirperf metaperf looptest stress-ng
 
 可通过环境变量覆盖各工具参数:
   PERF_DIRSTRESS_ARGS PERF_DIRPERF_ARGS PERF_METAPERF_ARGS PERF_LOOPTEST_ARGS
+  PERF_STRESS_NG_ARGS 可完全覆盖默认 stress-ng 参数；如需 link/symlink stressor 请用该变量显式指定
   PERF_FIO_ARGS PERF_FIO_RUNTIME PERF_FIO_SIZE PERF_FIO_BS PERF_FIO_NUMJOBS
   PERF_FIO_{SEQREAD,SEQWRITE,RANDREAD,RANDWRITE,RANDRW,BIGREAD,BIGWRITE}_{ARGS,BS,SIZE,NUMJOBS,IOENGINE,IODEPTH,DIRECT,RUNTIME}
   PERF_FIO_COLD_READ PERF_FIO_PREFILL_DRAIN PERF_FIO_PREFILL_REMOUNT PERF_FIO_DROP_CACHES PERF_FIO_COLD_READ_DROP_CACHES PERF_FIO_COLD_READ_CLEAR_CACHE
@@ -168,6 +169,19 @@ docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
     -e PERF_METAPERF_BG_FILES \
     -e PERF_LOOPTEST_ITERS \
     -e PERF_LOOPTEST_BUF_SIZE \
+    -e PERF_STRESS_NG_ARGS \
+    -e PERF_STRESS_NG_TIMEOUT \
+    -e PERF_STRESS_NG_DIR_WORKERS \
+    -e PERF_STRESS_NG_DIR_OPS \
+    -e PERF_STRESS_NG_DENTRY_WORKERS \
+    -e PERF_STRESS_NG_DENTRY_OPS \
+    -e PERF_STRESS_NG_RENAME_WORKERS \
+    -e PERF_STRESS_NG_RENAME_OPS \
+    -e PERF_STRESS_NG_UNLINK_WORKERS \
+    -e PERF_STRESS_NG_UNLINK_OPS \
+    -e PERF_STRESS_NG_HDD_WORKERS \
+    -e PERF_STRESS_NG_HDD_BYTES \
+    -e PERF_STRESS_NG_HDD_WRITE_SIZE \
     -e PERF_FIO_ARGS \
     -e PERF_FIO_SEQREAD_ARGS \
     -e PERF_FIO_SEQREAD_BS \
