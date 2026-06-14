@@ -289,9 +289,30 @@ run_looptest() {
     run_logged_tool looptest "$bin" "${args[@]}"
 }
 
+summarize_stress_ng_log() {
+    local log_path="$artifact_dir/tools/stress-ng.log"
+    local summary_path="$artifact_dir/tools/stress-ng-summary.tsv"
+
+    [[ -f "$log_path" ]] || return 0
+
+    awk '
+        BEGIN {
+            print "stressor\tbogo_ops\treal_secs\tusr_secs\tsys_secs\treal_ops_per_sec\tcpu_ops_per_sec"
+        }
+        $1 == "stress-ng:" && $2 == "metrc:" && $4 != "stressor" && $5 ~ /^[0-9]+$/ {
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $4, $5, $6, $7, $8, $9, $10
+        }
+    ' "$log_path" >"$summary_path"
+
+    if [[ "$(wc -l <"$summary_path" 2>/dev/null || echo 0)" -gt 1 ]]; then
+        info "stress-ng 摘要: $summary_path"
+    fi
+}
+
 run_stress_ng() {
     local work_dir="$mount_dir/.perf-stress-ng"
     local -a args=()
+    local status=0
 
     if ! command -v stress-ng >/dev/null 2>&1; then
         err "缺少 stress-ng"
@@ -323,7 +344,9 @@ run_stress_ng() {
         )
     fi
 
-    run_logged_tool stress-ng stress-ng "${args[@]}"
+    run_logged_tool stress-ng stress-ng "${args[@]}" || status=$?
+    summarize_stress_ng_log
+    return "$status"
 }
 
 prepare_fio_dataset() {
