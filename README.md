@@ -13,6 +13,8 @@ BrewFS is a Rust filesystem for container, AI, and object-storage-heavy workload
 
 The core design goal is to decouple compute from storage: applications read and write normal paths, while BrewFS handles chunk layout, object IO, caching, metadata transactions, compaction, and garbage collection.
 
+BrewFS is not a JuiceFS fork, but JuiceFS is the main production-grade reference point used for performance comparison and gap analysis. Current tuning work compares metadata caching, read/write cache behavior, writeback semantics, object-store amplification, compaction, and test coverage against JuiceFS so regressions and improvements can be measured against a mature baseline.
+
 ## Architecture
 
 Main layers:
@@ -207,6 +209,16 @@ More test and benchmark entry points:
 - [doc/testing/bench.md](doc/testing/bench.md)
 - [doc/testing/fuzz_testing_guide.md](doc/testing/fuzz_testing_guide.md)
 
+## JuiceFS Comparison
+
+BrewFS tracks JuiceFS as a practical benchmark for distributed filesystem semantics and object-storage performance. The comparison is organized around three document sets:
+
+- [JuiceFS internals notes](doc/juicefs/README.md): architecture, read/write paths, cache system, transactions, and slice compaction.
+- [BrewFS/JuiceFS gap analysis](doc/gap/README.md): module-by-module gaps and iteration roadmap.
+- [Performance roadmap](doc/performance/perf-optimization-roadmap.md): current tuning targets and validation expectations.
+
+Use these notes to understand where BrewFS intentionally differs from JuiceFS, where it is still catching up, and which benchmark scenarios are used to guard against regressions.
+
 ## Feature Flags
 
 ```bash
@@ -233,6 +245,8 @@ Common entry points:
 - [VFS internals](doc/vfs/README.md)
 - [Testing and CI guides](doc/README.md#testing-and-ci)
 - [Performance and JuiceFS comparison](doc/README.md#performance-and-juicefs-comparison)
+- [JuiceFS internals notes](doc/juicefs/README.md)
+- [BrewFS/JuiceFS gap analysis](doc/gap/README.md)
 - [Control plane](doc/operations/control-plane.md)
 
 ## Repository Map
