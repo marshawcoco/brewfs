@@ -275,6 +275,46 @@ Latest accepted BrewFS tuning:
 
 Latest rejected tuning checks:
 
+Cached writable stream-upload deferral check:
+
+```bash
+PERF_FIO_RUNTIME=10 PERF_LOG_TO_CONSOLE=false PERF_FUSE_OPS_LOG=1 \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite"
+
+PERF_FIO_RUNTIME=30 PERF_LOG_TO_CONSOLE=false \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+```
+
+Artifacts:
+
+- FUSE write diagnostic sample:
+  `docker/compose-xfstests/artifacts/perf-run-1781494986-3663`
+- Focused candidate run:
+  `docker/compose-xfstests/artifacts/perf-run-1781495701-28214`
+- Focused default comparison:
+  `docker/compose-xfstests/artifacts/perf-run-1781484237-25679`
+
+The diagnostic sample confirmed that fio `bs=4m` does not arrive at BrewFS as
+large aligned FUSE writes under kernel writeback-cache. The 10s sequential-write
+sample produced 58,448 FUSE `write` requests averaging 169.7 KiB, with all
+sampled writes carrying `write_flags=1`. The size histogram was dominated by
+4 KiB, 8 KiB, and 1 MiB requests, and the writeback path emitted 13,191
+partial-tail uploads. The rejected candidate delayed streaming upload from
+cached-only writable slices until the dirty slice reached the configured
+writeback target. It was not adopted: the isolated sequential wall time
+improved, but random-write and mixed read/write wall times regressed, and the
+random-write S3 PUT count increased.
+
+| Workload | Default focused baseline | Cached writable stream deferral | Decision |
+| --- | ---: | ---: | --- |
+| `fio-seqwrite` | 142s, W 336.2 MiB/s | 130s, W 234.3 MiB/s | reject: wall improved, but active BW was much lower |
+| `fio-randwrite` | 129s, W 125.5 MiB/s | 137s, W 110.8 MiB/s | reject: wall and active BW regression |
+| `fio-randrw` | 158s, R 192.6 / W 86.4 MiB/s | 163s, R 361.8 / W 162.4 MiB/s | reject: wall regression despite active BW gain |
+
 Writeback upload concurrency 6 check:
 
 ```bash
