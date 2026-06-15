@@ -339,6 +339,42 @@ Latest accepted BrewFS tuning:
 
 Latest rejected tuning checks:
 
+Redis readdir-plus attr warmup check:
+
+```bash
+PERF_LOG_TO_CONSOLE=false CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "dirperf metaperf"
+```
+
+Artifacts:
+
+- Readdir-plus candidate:
+  `docker/compose-xfstests/artifacts/perf-run-1781552878-2513`
+- Same-window baseline:
+  `docker/compose-xfstests/artifacts/perf-run-1781553256-12505`
+
+The candidate implemented Redis `readdir_plus` and made `MetaClient::readdir`
+use it to synchronously warm child attr cache, following the JuiceFS pattern of
+carrying attrs out of directory scans. Focused Redis tests proved the attrs were
+available and a child `stat` hit the MetaClient attr cache after `readdir`, but
+the perf run showed this was the wrong attachment point: ordinary `readdir`
+paid the plus-path cost while the current `metaperf` workload did not gain
+enough from the warmer child attrs. The code was rejected and reverted. A
+future retry should attach plus attrs only to a true FUSE `readdirplus` path or
+directory-handle mode that can prove it will consume the attrs.
+
+| Workload | Readdir-plus candidate | Baseline | Decision |
+| --- | ---: | ---: | --- |
+| `dirperf` wall | 8s | 8s | neutral |
+| `metaperf` wall | 191s | 190s | reject: no wall gain |
+| `create` | 1058.6 ops/s | 1060.9 ops/s | reject: slight regression |
+| `open` | 9745.5 ops/s | 9698.1 ops/s | neutral |
+| `stat` | 1015091.3 ops/s | 1025026.8 ops/s | reject: slight regression |
+| `readdir` | 65027.3 ops/s | 65385.7 ops/s | reject: target regressed |
+| `rename` | 1904.7 ops/s | 1918.1 ops/s | reject: slight regression |
+
 Open-file cache time-to-idle check:
 
 ```bash
