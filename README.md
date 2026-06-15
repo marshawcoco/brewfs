@@ -339,6 +339,41 @@ Latest accepted BrewFS tuning:
 
 Latest rejected tuning checks:
 
+Open-file cache time-to-idle check:
+
+```bash
+PERF_LOG_TO_CONSOLE=false CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "metaperf"
+```
+
+Artifacts:
+
+- Time-to-idle candidate:
+  `docker/compose-xfstests/artifacts/perf-run-1781551121-24012`
+- Same-window TTL baseline:
+  `docker/compose-xfstests/artifacts/perf-run-1781551472-25618`
+
+The candidate changed the Redis open-file attribute cache from fixed
+time-to-live to time-to-idle, following the idea that actively reopened files
+should stay hot. Focused tests confirmed the cache stayed warm across repeated
+opens, and the internal counters improved: open fresh-stat/miss count dropped
+from about `41601` to `35401` while open-file cache hits rose from `299000` to
+`302600`. It was still rejected and reverted because the same-window metaperf
+run did not improve throughput, and TTI would extend the stale-attribute window
+under repeated opens unless BrewFS adds a stronger cross-client invalidation or
+version check.
+
+| Workload | TTI candidate | TTL baseline | Decision |
+| --- | ---: | ---: | --- |
+| `metaperf` wall | 191s | 192s | neutral |
+| `create` | 1074.7 ops/s | 1082.8 ops/s | reject: slight regression |
+| `open` | 9739.7 ops/s | 9776.3 ops/s | reject: no throughput gain |
+| `stat` | 1017762.2 ops/s | 1012718.1 ops/s | neutral |
+| `readdir` | 65318.7 ops/s | 65589.9 ops/s | reject: slight regression |
+| `rename` | 1927.2 ops/s | 1915.3 ops/s | neutral |
+
 Commit wait 20ms polling check:
 
 ```bash

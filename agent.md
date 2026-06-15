@@ -56,16 +56,22 @@ Useful BrewFS areas:
 Every performance attempt must follow this loop:
 
 1. State the hypothesis and expected metric movement.
-2. Inspect the BrewFS hot path and the matching JuiceFS code path.
-3. Add or adjust focused tests before risky behavior changes.
-4. Make the smallest code change that can prove or disprove the hypothesis.
-5. Run local compile/test checks relevant to the touched code.
-6. Run BrewFS perf and JuiceFS perf with matching parameters.
-7. Compare fio JSON, metadata logs, and total script wall time.
-8. Update `README.md` with the new performance comparison table.
-9. Review the diff for correctness, concurrency, cache consistency, and cleanup.
-10. Commit only changes backed by perf or correctness evidence.
-11. Revert experiments that do not improve the target metric or that regress
+2. Read the latest README rejected-tuning notes and performance docs, then
+   explicitly rule out repeated attempts unless a new constraint or metric makes
+   the retry meaningful.
+3. Inspect the BrewFS hot path and the matching JuiceFS code path.
+4. Add or adjust focused tests before risky behavior changes.
+5. Make the smallest code change that can prove or disprove the hypothesis.
+6. Run local compile/test checks relevant to the touched code.
+7. Run BrewFS perf and JuiceFS perf with matching parameters.
+8. Compare fio JSON, metadata logs, total script wall time, and internal BrewFS
+   counters such as slice creation, partial-tail uploads, cache hit ratio, and
+   metadata cache hits.
+9. Update `README.md` with the new performance comparison table.
+10. Review the diff for correctness, concurrency, cache consistency, and
+    cleanup.
+11. Commit only changes backed by perf or correctness evidence.
+12. Revert experiments that do not improve the target metric or that regress
     important secondary scenarios.
 
 Do not keep speculative changes because they look theoretically better. Perf
@@ -117,6 +123,13 @@ full comparison:
 bash docker/compose-xfstests/run_redis_perf.sh --s3 --tools "fio-randrw dirperf metaperf"
 ```
 
+Rejected ideas already recorded in `README.md` are part of the test history.
+Before coding around writeback slice coalescing, auto-flush timing, staging IO,
+upload concurrency, range prefetch, notify polling, or compression, check the
+corresponding rejected section first. A repeated experiment needs a narrower
+guard, a different workload target, or a clear reason the prior negative result
+no longer applies.
+
 ## Performance Reporting
 
 For fio scenarios, report both:
@@ -156,6 +169,8 @@ Before committing a performance change, review these points:
   and broad invalidations when a precise one is available.
 - Regression risk: secondary workloads such as `randrw`, `dirperf`, and
   `metaperf` must not pay a large cost for a narrow improvement.
+- Prior art: if the diff resembles a previously rejected README experiment,
+  prove why it is not the same change before running the expensive perf loop.
 
 ## Flamegraph Guidance
 
