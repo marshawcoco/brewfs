@@ -275,6 +275,35 @@ Latest accepted BrewFS tuning:
 
 Latest rejected tuning checks:
 
+Older-unique append slice-reuse check:
+
+```bash
+PERF_FIO_RUNTIME=30 \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+```
+
+Artifacts:
+
+- Focused candidate run:
+  `docker/compose-xfstests/artifacts/perf-run-1781493022-1268`
+- Focused default comparison:
+  `docker/compose-xfstests/artifacts/perf-run-1781484237-25679`
+
+The candidate allowed an older FUSE `unique` request to reuse an existing dirty
+slice for pure append while preserving the older-unique rejection for overlapping
+writes. Targeted tests confirmed the intended behavior, but the focused perf run
+did not validate a stable gain: sequential write improved slightly, while random
+write and mixed read/write regressed versus the focused default comparison. The
+code change and tests were reverted.
+
+| Workload | Default focused baseline | Older-unique append reuse | Decision |
+| --- | ---: | ---: | --- |
+| `fio-seqwrite` | 142s, W 336.2 MiB/s | 138s, W 326.2 MiB/s | reject: wall improved but active BW and slice stats did not validate the hypothesis |
+| `fio-randwrite` | 129s, W 125.5 MiB/s | 135s, W 116.4 MiB/s | reject: wall and active BW regression |
+| `fio-randrw` | 158s, R 192.6 / W 86.4 MiB/s | 163s, R 409.2 / W 183.5 MiB/s | reject: wall regression despite active BW gain |
+
 Cached sub-block 5s coalescing-window check:
 
 ```bash
