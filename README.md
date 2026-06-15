@@ -311,6 +311,39 @@ Latest accepted BrewFS tuning:
 
 Latest rejected tuning checks:
 
+Cached sub-block 4s idle-grace check:
+
+```bash
+PERF_FIO_RUNTIME=30 PERF_LOG_TO_CONSOLE=false \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+```
+
+Artifacts:
+
+- Same-window baseline:
+  `docker/compose-xfstests/artifacts/perf-run-1781525876-5023`
+- 4s idle-grace candidate:
+  `docker/compose-xfstests/artifacts/perf-run-1781526657-15265`
+
+The candidate extended cached-only sub-block idle grace from 3s to 4s. It
+improved pure write wall time in the focused buffered run, but mixed `randrw`
+lost active read/write bandwidth and shifted many deferred idle tails into
+`tooMany` pressure tails. The code was reverted and the direct-IO guard was not
+run.
+
+| Workload | Same-window baseline | 4s idle-grace candidate | Decision |
+| --- | ---: | ---: | --- |
+| `fio-seqwrite` | 137s, W 256.2 MiB/s | 126s, W 293.8 MiB/s | reject: pure-write gain only |
+| `fio-randwrite` | 138s, W 120.8 MiB/s, p99 112.7ms | 129s, W 113.0 MiB/s, p99 43.3ms | reject: active BW lower |
+| `fio-randrw` | 165s, R 213.3 / W 95.6 MiB/s, R p99 170.9ms | 166s, R 175.1 / W 78.3 MiB/s, R p99 210.8ms | reject: mixed active BW and read tail regression |
+
+The detailed counters explain the mixed-workload regression:
+`fio-randrw` idle partial tails dropped from `13433` to `9686`, but `tooMany`
+partial tails rose from `2369` to `6835`, total partial tails increased from
+`16258` to `17162`, and S3 PUTs rose from `17247` to `18148`.
+
 Compression-off comparison check:
 
 ```bash
