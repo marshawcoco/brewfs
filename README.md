@@ -231,49 +231,65 @@ bash docker/compose-xfstests/run_juicefs_perf.sh --writeback-throughput-profile
 
 Artifacts:
 
-- BrewFS: `docker/compose-xfstests/artifacts/perf-run-1781498342-8219`
-- JuiceFS: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781499534-26833`
+- BrewFS: `docker/compose-xfstests/artifacts/perf-run-1781504151-25008`
+- JuiceFS: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781505681-294`
 
 All default perf tools passed on both filesystems.
 
 Wall seconds include close/flush tail. Fio bandwidth reports the active IO
 window, so both columns are useful when diagnosing writeback behavior. This
-snapshot used fio `direct=0`, as recorded in the generated fio JSON.
+snapshot used fio `direct=0`, as recorded in the generated fio JSON. The
+JuiceFS run emitted slow S3 PUT, disk-cache write timeout, and direct-upload
+fallback warnings during write-heavy phases, so the write-side JuiceFS numbers
+below are the local same-run comparison rather than an ideal upper bound.
 
-| Workload | BrewFS wall | JuiceFS wall | BrewFS fio BW | JuiceFS fio BW | BrewFS/JuiceFS BW |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `fio-bigwrite` | 1s | 1s | W 1.00 GiB/s | W 3.36 GiB/s | W 0.30x |
-| `fio-bigread` | 2s | 1s | R 519.3 MiB/s | R 2.29 GiB/s | R 0.22x |
-| `fio-seqread` | 60s | 60s | R 1.69 GiB/s | R 2.46 GiB/s | R 0.69x |
-| `fio-seqwrite` | 150s | 132s | W 71.9 MiB/s | W 267.5 MiB/s | W 0.27x |
-| `fio-randread` | 60s | 61s | R 727.1 MiB/s | R 3.21 GiB/s | R 0.22x |
-| `fio-randwrite` | 142s | 157s | W 103.3 MiB/s | W 295.8 MiB/s | W 0.35x |
-| `fio-randrw` | 166s | 60s | R 164.8 / W 73.9 MiB/s | R 195.7 / W 88.4 MiB/s | R 0.84x / W 0.84x |
+| Workload | BrewFS wall | JuiceFS wall | BrewFS fio BW | JuiceFS fio BW | BrewFS/JuiceFS BW | BrewFS p99 | JuiceFS p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `fio-bigwrite` | 2s | 1s | W 925.9 MiB/s | W 3.31 GiB/s | W 0.27x | W 40.1ms | W 16.4ms |
+| `fio-bigread` | 2s | 1s | R 536.1 MiB/s | R 2.35 GiB/s | R 0.22x | R 99.1ms | R 42.7ms |
+| `fio-seqread` | 61s | 60s | R 1.76 GiB/s | R 2.48 GiB/s | R 0.71x | R 3.0ms | R 1.5ms |
+| `fio-seqwrite` | 149s | 128s | W 74.5 MiB/s | W 276.4 MiB/s | W 0.27x | W 60.0ms | W 329.3ms |
+| `fio-randread` | 60s | 60s | R 758.8 MiB/s | R 3.20 GiB/s | R 0.23x | R 46.4ms | R 7.0ms |
+| `fio-randwrite` | 152s | 148s | W 75.1 MiB/s | W 277.6 MiB/s | W 0.27x | W 38.0ms | W 333.4ms |
+| `fio-randrw` | 164s | 60s | R 177.3 / W 79.5 MiB/s | R 192.6 / W 86.6 MiB/s | R 0.92x / W 0.92x | R 109.6ms / W 19.5ms | R 625.0ms / W 12.4ms |
 
 Metadata comparison from `metaperf`:
 
 | Operation | BrewFS | JuiceFS | BrewFS/JuiceFS |
 | --- | ---: | ---: | ---: |
-| `create` | 849 ops/s | 1320 ops/s | 0.64x |
-| `open` | 9372 ops/s | 23444 ops/s | 0.40x |
-| `stat` | 1004525 ops/s | 1014650 ops/s | 0.99x |
-| `readdir` | 64236 ops/s | 89330 ops/s | 0.72x |
-| `rename` | 1883 ops/s | 2677 ops/s | 0.70x |
+| `create` | 790.9 ops/s | 1344.7 ops/s | 0.59x |
+| `open` | 9404.9 ops/s | 23448.0 ops/s | 0.40x |
+| `stat` | 1011161.0 ops/s | 1023169.6 ops/s | 0.99x |
+| `readdir` | 63196.1 ops/s | 93685.3 ops/s | 0.67x |
+| `rename` | 1899.0 ops/s | 2661.0 ops/s | 0.71x |
 
-The full `metaperf` tool wall time was `371s` on BrewFS and `285s` on JuiceFS.
+The full `metaperf` tool wall time was `331s` on BrewFS and `279s` on JuiceFS.
 
 Latest accepted BrewFS tuning:
 
+- `src/vfs/io/reader.rs` now fills the caller result buffer directly for
+  single-span reads by using `DataFetcher::read_at_into`. This avoids building a
+  temporary `Bytes` span and then copying it into the final read buffer for the
+  common one-chunk read path.
 - `src/vfs/cache/write_back.rs` caches already-created dirty directories in
   `FsWriteBackCache`, avoiding repeated `create_dir_all` checks for every
   staged writeback batch under the same inode/chunk directory.
 - Full BrewFS perf artifact:
-  `docker/compose-xfstests/artifacts/perf-run-1781485889-24840`.
+  `docker/compose-xfstests/artifacts/perf-run-1781504151-25008`.
 - Compared with the previous accepted BrewFS run
-  `docker/compose-xfstests/artifacts/perf-run-1781466015-27228`,
-  `fio-seqwrite` improved from 153s to 140s and `fio-randrw` improved from
-  177s to 173s. `fio-randwrite` moved from 150s to 153s, so the remaining
-  random-write path still needs targeted work.
+  `docker/compose-xfstests/artifacts/perf-run-1781498342-8219`, `fio-bigread`
+  bandwidth improved from 519.3 to 536.1 MiB/s and p99 fell from 116.9 to
+  99.1ms; `fio-seqread` improved from 1.69 to 1.76 GiB/s and p99 fell from
+  3.7 to 3.0ms; `fio-randread` improved from 727.1 to 758.8 MiB/s and p99 fell
+  from 60.0 to 46.4ms; `fio-randrw` active bandwidth improved from
+  R 164.8 / W 73.9 MiB/s to R 177.3 / W 79.5 MiB/s.
+- A focused read/mixed check
+  `docker/compose-xfstests/artifacts/perf-run-1781503642-13640` showed the same
+  read-side direction. A write-focused confirmation
+  `docker/compose-xfstests/artifacts/perf-run-1781505366-20889` did not
+  reproduce the full-run `fio-randwrite` wall regression, but write p99 remains
+  noisy. The next bottleneck remains small-object writeback amplification and
+  close/flush tail rather than this read copy path.
 
 Latest rejected tuning checks:
 
@@ -546,17 +562,18 @@ Interpretation:
 
 - This run used fio buffered IO (`direct=0`), so read bandwidth is a
   cache-aware regression signal rather than a pure cold-object-store maximum.
-- BrewFS mixed `randrw` active IO bandwidth is still close to JuiceFS
-  (`0.84x` read and write), but BrewFS has a much longer wall-time tail
-  (`166s` versus `60s`).
+- BrewFS mixed `randrw` active IO bandwidth is now close to JuiceFS
+  (`0.92x` read and write), but BrewFS still has a much longer wall-time tail
+  (`164s` versus `60s`).
 - The main remaining data-path gap is active write throughput: BrewFS is about
-  `0.27x` of JuiceFS on sequential write and `0.35x` on random write in this
+  `0.27x` of JuiceFS on sequential write and random write in this
   snapshot, even though the JuiceFS random-write wall time was hurt by local
   cache timeouts.
 - BrewFS internal stats still point at small-object writeback amplification:
-  `fio-seqwrite` emitted 17.7k upload batches averaging about 0.5 MiB with
-  97% partial tails, and `metaperf` emitted 27k tiny staged/uploaded slices for
-  105.5 MiB of FUSE writes.
+  `fio-seqwrite` emitted 13.2k upload batches averaging about 0.8 MiB with
+  97% partial tails, `fio-randwrite` emitted 11.7k batches averaging about
+  0.7 MiB with 92% partial tails, and `metaperf` emitted 28k tiny
+  staged/uploaded slices for 109.4 MiB of FUSE writes.
 - The JuiceFS run emitted slow PUT, disk-cache timeout, and `readSlice context
   canceled` warnings on the console, but completed all default scenarios as
   pass. Treat the JuiceFS write numbers as the current local-run result rather

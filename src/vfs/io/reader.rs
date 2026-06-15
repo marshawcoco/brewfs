@@ -792,6 +792,30 @@ where
         // handles asynchronous readahead after each successful read.
         let _ahead = self.check_session(offset, actual_len);
 
+        if spans.len() == 1 {
+            let span = spans[0];
+            let mut data = vec![0; actual_len];
+            let result = self
+                .read_chunk_span_into(span.index, span.offset, &mut data)
+                .instrument(tracing::trace_span!(
+                    "read_at.read_single_span_into",
+                    index = span.index,
+                    offset = span.offset,
+                    len = actual_len
+                ))
+                .await;
+
+            drop(pin_guard);
+
+            if should_clean {
+                self.cleanup_invalid()
+                    .instrument(tracing::trace_span!("read_at.cleanup_invalid"))
+                    .await;
+            }
+
+            return result.map(|_| data);
+        }
+
         let mut chunks: Vec<Option<bytes::Bytes>> = vec![None; spans.len()];
         let result = async {
             let mut reads = FuturesUnordered::new();
@@ -841,18 +865,25 @@ where
         result.map(|_| data)
     }
 
-    // Read one chunk span directly into the caller buffer through DataFetcher →
-    // BlockStore, using the per-handle chunk→slice metadata cache to skip
-    // repeated meta queries within the same chunk.
-    /// Serve the chunk span directly from the block cache when possible,
-    /// returning the cached Bytes (zero-copy Arc bump).  Falls back to
-    /// DataFetcher for cache misses.
+    // Read one chunk span through DataFetcher using the per-handle chunk→slice
+    // metadata cache to skip repeated meta queries within the same chunk.
     async fn read_chunk_span(
         &self,
         index: u64,
         offset: u64,
         len: usize,
     ) -> anyhow::Result<bytes::Bytes> {
+        let mut data = vec![0; len];
+        self.read_chunk_span_into(index, offset, &mut data).await?;
+        Ok(bytes::Bytes::from(data))
+    }
+
+    async fn read_chunk_span_into(
+        &self,
+        index: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> anyhow::Result<()> {
         let chunk_id = chunk_id_for(self.inode.ino(), index)?;
 
         for attempt in 0..MAX_SLICE_READ_RETRIES {
@@ -876,15 +907,15 @@ where
                     &self.backend,
                     (*slices_arc).clone(),
                 );
-                fetcher.read_at(offset.into(), len).await
+                fetcher.read_at_into(offset.into(), buf).await
             }
             .await;
 
             match result {
-                Ok(data) => {
-                    self.complete_demand_slices(index, offset, len, None::<&anyhow::Error>)
+                Ok(()) => {
+                    self.complete_demand_slices(index, offset, buf.len(), None::<&anyhow::Error>)
                         .await;
-                    return Ok(bytes::Bytes::from(data));
+                    return Ok(());
                 }
                 Err(err)
                     if attempt + 1 < MAX_SLICE_READ_RETRIES && is_transient_read_error(&err) =>
@@ -898,7 +929,7 @@ where
                     tokio::time::sleep(retry_delay(attempt)).await;
                 }
                 Err(err) => {
-                    self.complete_demand_slices(index, offset, len, Some(&err))
+                    self.complete_demand_slices(index, offset, buf.len(), Some(&err))
                         .await;
                     return Err(err);
                 }
