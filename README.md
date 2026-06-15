@@ -404,6 +404,30 @@ queueing rather than an underfilled upload semaphore.
 | `fio-randwrite` | 138s, W 96.5 MiB/s, PUT avg 24.0ms | 139s, W 126.8 MiB/s, PUT avg 48.4ms | reject: wall neutral and PUT latency doubled |
 | `fio-randrw` | 161s, R 221.3 / W 99.4 MiB/s, R p99 59.0ms | 163s, R 221.4 / W 99.1 MiB/s, R p99 121.1ms | reject: wall and read tail regression |
 
+Unsynced writeback stage flush removal check:
+
+```bash
+PERF_LOG_TO_CONSOLE=false \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+```
+
+Artifact: `docker/compose-xfstests/artifacts/perf-run-1781518481-30002`.
+
+The candidate removed `File::flush()` from unsynced writeback staging while
+keeping `writeback_persist_sync=false`. `fio-seqwrite` and `fio-randwrite`
+finished in 61s, but `fio-randrw` prefill failed with fsync `EIO`. The code was
+reverted: even without durable `sync_all`, Tokio file staging still needs
+`flush()` as the async write completion boundary before sealing and committing a
+dirty slice.
+
+| Workload | Candidate result | Decision |
+| --- | ---: | --- |
+| `fio-seqwrite` | 61s | reject: later correctness failure |
+| `fio-randwrite` | 61s | reject: later correctness failure |
+| `fio-randrw` prefill | fsync `EIO` on `.perf-fio-randrw` files | reject: invalid writeback staging semantics |
+
 Uncompressed aligned vectored PUT fast-path check:
 
 ```bash
