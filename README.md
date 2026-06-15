@@ -344,6 +344,41 @@ The detailed counters explain the mixed-workload regression:
 partial tails rose from `2369` to `6835`, total partial tails increased from
 `16258` to `17162`, and S3 PUTs rose from `17247` to `18148`.
 
+Cached forward-stream adaptive idle-grace check:
+
+```bash
+PERF_FIO_RUNTIME=30 PERF_LOG_TO_CONSOLE=false \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+```
+
+Artifacts:
+
+- Same-window baseline:
+  `docker/compose-xfstests/artifacts/perf-run-1781525876-5023`
+- Adaptive forward-stream candidate:
+  `docker/compose-xfstests/artifacts/perf-run-1781528039-24164`
+
+The candidate tried to limit the 4s idle grace to cached writes that looked like
+a forward stream, leaving other cached/random/direct writes on the existing 3s
+grace. It improved wall time in the focused run, but `fio-randrw` active
+read/write bandwidth regressed sharply and the final stats showed residual dirty
+state. The code was reverted.
+
+| Workload | Same-window baseline | Adaptive candidate | Decision |
+| --- | ---: | ---: | --- |
+| `fio-seqwrite` | 137s, W 256.2 MiB/s | 128s, W 242.6 MiB/s | reject: wall improved but active BW lower |
+| `fio-randwrite` | 138s, W 120.8 MiB/s, p99 112.7ms | 135s, W 292.1 MiB/s, p99 143.7ms | reject: p99 regression and long wall-active tail |
+| `fio-randrw` | 165s, R 213.3 / W 95.6 MiB/s, R p99 170.9ms | 161s, R 158.7 / W 71.3 MiB/s, R p99 71.8ms | reject: mixed active BW regression |
+
+The adaptive hint reduced `fio-randrw` idle partial tails from `13433` to
+`10749`, but `tooMany` tails rose to `5432`, total partial tails still increased
+to `16772`, upload batches increased to `17627`, and the report showed about
+`3131 MiB` dirty state after the mixed workload. The next attempt should avoid
+time-window extension and instead target real small-write coalescing or upload
+scheduling.
+
 Compression-off comparison check:
 
 ```bash
