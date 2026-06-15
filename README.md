@@ -428,6 +428,44 @@ dirty slice.
 | `fio-randwrite` | 61s | reject: later correctness failure |
 | `fio-randrw` prefill | fsync `EIO` on `.perf-fio-randrw` files | reject: invalid writeback staging semantics |
 
+Writeback stage vectored IO check:
+
+```bash
+PERF_LOG_TO_CONSOLE=false \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+
+PERF_FIO_DIRECT=1 PERF_LOG_TO_CONSOLE=false \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-seqwrite fio-randwrite fio-randrw"
+```
+
+Artifacts:
+
+- Buffered focused candidate:
+  `docker/compose-xfstests/artifacts/perf-run-1781519612-13625`
+- Direct-IO guard:
+  `docker/compose-xfstests/artifacts/perf-run-1781520276-30589`
+
+The candidate kept `File::flush()` in place but changed local writeback staging
+from per-`Bytes` `write_all` calls to batched `write_vectored` calls. Unit tests
+covered partial vectored writes and the existing writeback/commit-before-upload
+tests passed. Buffered pure writes improved substantially, but mixed `randrw`
+lost too much active bandwidth, moving BrewFS away from the JuiceFS parity in
+the accepted snapshot. The direct-IO guard also increased sequential and mixed
+wall time versus the current direct baseline. The code change was reverted.
+
+| Workload | Accepted / direct baseline | Vectored stage candidate | Decision |
+| --- | ---: | ---: | --- |
+| `fio-seqwrite` direct=0 | 150s, W 72.8 MiB/s | 120s, W 107.8 MiB/s | promising pure-write gain |
+| `fio-randwrite` direct=0 | 155s, W 78.6 MiB/s | 108s, W 113.0 MiB/s | promising pure-write gain |
+| `fio-randrw` direct=0 | 161s, R 212.6 / W 95.5 MiB/s | 164s, R 133.3 / W 59.5 MiB/s | reject: mixed active BW regression |
+| `fio-seqwrite` direct=1 | 68s, W 71.3 MiB/s | 79s, W 73.8 MiB/s | reject: direct wall regression |
+| `fio-randwrite` direct=1 | 153s, W 55.6 MiB/s | 145s, W 54.8 MiB/s | neutral: wall improved but BW slipped |
+| `fio-randrw` direct=1 | 173s, R 118.5 / W 53.3 MiB/s | 183s, R 176.1 / W 78.7 MiB/s | reject: direct wall regression |
+
 Uncompressed aligned vectored PUT fast-path check:
 
 ```bash
