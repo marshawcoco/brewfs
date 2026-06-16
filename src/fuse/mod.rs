@@ -2039,6 +2039,10 @@ where
         uid: u32,
         gid: u32,
     ) -> FuseResult<()> {
+        if uid == 0 {
+            return Ok(());
+        }
+
         if ino == self.root_ino() {
             return Ok(());
         }
@@ -3087,6 +3091,25 @@ mod fuse_init_tests {
             .unwrap_err();
 
         assert_eq!(err, Errno::from(libc::EACCES));
+    }
+
+    #[tokio::test]
+    async fn open_allows_root_through_non_searchable_parent() {
+        let fs = new_fuse_test_vfs().await;
+        fs.mkdir_p("/dir").await.unwrap();
+        fs.create_file("/dir/file.txt").await.unwrap();
+        let dir = fs.stat("/dir").await.unwrap();
+        let file = fs.stat("/dir/file.txt").await.unwrap();
+        fs.chmod(dir.ino, 0o000).await.unwrap();
+
+        Filesystem::open(
+            &fs,
+            request_with_ids(0, 0),
+            file.ino as u64,
+            libc::O_RDONLY as u32,
+        )
+        .await
+        .expect("root should bypass directory search permission checks");
     }
 
     #[tokio::test]

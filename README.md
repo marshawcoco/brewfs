@@ -273,8 +273,51 @@ BrewFS total metadata wall remains far above JuiceFS despite matching `stat`
 throughput; `open`, `create`, `readdir`, and `rename` remain metadata-cache and
 Redis-roundtrip targets.
 
+Focused metadata diagnostics:
+
+- Zero-byte `metaperf` isolates metadata from 4KiB small-file writeback. The
+  diagnostic shows BrewFS create is not the pure-metadata problem: zero-byte
+  create is already faster than JuiceFS, while `open`, `readdir`, and `rename`
+  still trail JuiceFS. Default 4KiB create remains slower because it emits tens
+  of thousands of tiny staged/uploaded writeback slices.
+- Artifacts: BrewFS zero-byte baseline
+  `docker/compose-xfstests/artifacts/perf-run-1781570960-17324`, BrewFS root
+  fast-path candidate `docker/compose-xfstests/artifacts/perf-run-1781572032-21175`,
+  JuiceFS zero-byte comparison
+  `docker/compose-xfstests/artifacts/juicefs-perf-run-1781571279-16802`, and
+  BrewFS default 4KiB candidate
+  `docker/compose-xfstests/artifacts/perf-run-1781572378-29881`.
+
+| Zero-byte `metaperf` operation | BrewFS before | BrewFS root fast path | JuiceFS | New BrewFS/JuiceFS |
+| --- | ---: | ---: | ---: | ---: |
+| wall | 189s | 188s | 192s | 0.98x |
+| `create` | 4975.1 ops/s | 5151.3 ops/s | 4462.4 ops/s | 1.15x |
+| `open` | 9838.9 ops/s | 10168.5 ops/s | 23624.0 ops/s | 0.43x |
+| `stat` | 1025512.4 ops/s | 1026596.5 ops/s | 1018349.2 ops/s | 1.01x |
+| `readdir` | 66733.4 ops/s | 65632.0 ops/s | 90681.7 ops/s | 0.72x |
+| `rename` | 1925.7 ops/s | 1955.0 ops/s | 2676.4 ops/s | 0.73x |
+
+For default 4KiB focused `metaperf`, the same root fast path moved `open` to
+`10142.3 ops/s` versus nearby focused baselines at `9698.1`, `9776.3`, and
+`9681.3 ops/s`; `create` moved to `1100.3 ops/s`; `rename` moved to
+`1935.6 ops/s`; `readdir` regressed to `64422.5 ops/s`; wall time rose to
+`198s` because the fixed 30s create window completed more files and left a
+slightly larger cleanup/writeback tail. The run still emitted `35801` S3 PUTs
+for only `146.6 MiB` of staged data, so the next write-path optimization must
+reduce tiny explicit-flush object amplification rather than tune root/open
+permission checks again.
+
 Latest accepted BrewFS tuning:
 
+- `src/fuse/mod.rs` now lets uid 0 bypass cached-inode ancestor search
+  permission checks before FUSE `open`, matching Linux root search semantics and
+  avoiding repeated `get_paths`/ancestor checks in root-run perf workloads. The
+  TDD guard verifies root can open through a non-searchable parent while the
+  existing non-root cached-inode open rejection still passes. Focused
+  zero-byte `metaperf` moved `open` from `9838.9` to `10168.5 ops/s`; focused
+  default 4KiB `metaperf` moved `open` to `10142.3 ops/s`, with the caveat that
+  `readdir` regressed slightly and the default wall tail remains dominated by
+  small-file writeback.
 - `src/chunk/cache.rs` now promotes disk-cache hits directly back into the hot
   in-memory cache while the hot tier is below 80% of its byte budget. This keeps
   repeated random reads from paying local disk read, CRC verification, and cache
