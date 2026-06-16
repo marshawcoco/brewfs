@@ -676,8 +676,9 @@ Latest rejected tuning checks:
 The following small candidates were tested against accepted short baseline
 `docker/compose-xfstests/artifacts/perf-run-1781594407-19392` and then reverted.
 Their transient artifacts were removed after comparison to keep local storage
-bounded. All runs used the writeback throughput profile with fio `direct=0`,
-64MiB `fio-big*` data, 128MiB seq/random data, and 5s timed seq/random windows.
+bounded unless the artifact is explicitly listed below. All runs used the
+writeback throughput profile with fio `direct=0`, 64MiB `fio-big*` data,
+128MiB seq/random data, and 5s timed seq/random windows.
 
 | Candidate | Focused tools | Positive signal | Regression | Decision |
 | --- | --- | --- | --- | --- |
@@ -691,6 +692,14 @@ bounded. All runs used the writeback throughput profile with fio `direct=0`,
 | Share upload/stage chunk buffer with `Arc<[Bytes]>` | `fio-bigwrite fio-seqwrite fio-randwrite fio-randrw` | bigwrite BW +8.3%, seqwrite BW +9.2%, randwrite BW +13.0%, randwrite p99 45.4ms -> 30.0ms | seqwrite wall 66s -> 78s, randwrite wall 117s -> 123s, randrw read/write BW -4.6%/-4.7%, randrw write p99 4.6ms -> 9.5ms, randwrite PUTs/GiB +24.8% | reject: removing the Vec clone does not reduce object amplification and worsens wall/mixed guards |
 | Count only writable slices for `too_many` pressure | `fio-bigwrite fio-seqwrite fio-randwrite fio-randrw` | seqwrite wall 66s -> 65s, seqwrite PUTs/GiB -6.6%, seqwrite too_many tails 37 -> 0, randwrite BW +11.7%, randwrite p99 45.4ms -> 30.3ms | randwrite wall 117s -> 127s, randwrite PUTs/GiB +32.3%, randwrite partial-tail ratio 0.831 -> 0.885, randrw write p99 4.6ms -> 9.1ms, bigwrite BW -3.4% | reject: delayed too_many pressure shifts work into smaller randwrite objects and longer close/flush tail |
 | Enable compact profile defaults (`interval=2s`, `min_slice_count=3`) | `fio-bigwrite fio-seqwrite fio-randwrite fio-randrw` | bigwrite BW 911.0 MiB/s -> 1.04 GiB/s, seqwrite BW 1.29 -> 1.39 GiB/s, randwrite BW 1.56 -> 1.70 GiB/s, randrw wall 32s -> 12s | seqwrite wall 66s -> 83s, randwrite wall 117s -> 129s, randrw read/write BW 1.28 GiB/s / 600.0 MiB/s -> 845.7 / 384.1 MiB/s | reject as default: config pass-through is kept, but low-interval compaction hurts wall time and mixed throughput |
+| Redis rename outcome returned to `MetaClient` | `metaperf` | standalone `metaperf` wall was 187s, but this is not comparable to the full-matrix 248s after fio pressure | vs accepted same-parameter run: create 3470.4 -> 3174.0, open 10106.8 -> 9149.6, stat 1021723.6 -> 932515.8, readdir 109145.2 -> 98537.3, rename 1915.0 -> 1863.9 ops/s | reject: avoiding the destination prelookup did not improve the target rename path; code was reverted after local CI and focused perf |
+
+The Redis rename-outcome artifact is
+`docker/compose-xfstests/artifacts/perf-run-1781627417-18180`. Before that
+focused perf check, the local CI gate from `agent.md` passed, including
+`cargo fmt --all --check`, `cargo check --workspace`, `cargo build --workspace`,
+the BrewFS no-default feature checks, `cargo test --workspace --lib --bins`, and
+`cargo clippy --workspace`.
 
 These results point away from micro-optimizing cache file writes, local overlay
 allocation shape, or unconditional atime skipping. The next useful attempt
