@@ -121,12 +121,12 @@
 
 ## 并行 agent 补充审查
 
-### P0 补充：BrewFS 已支持 direct matrix，JuiceFS runner 尚未对齐
+### P0 补充：direct matrix 已对齐，下一步补 report 口径
 
-- 位置：BrewFS `run_redis_perf.sh`/`run_perf_in_container.sh` 已支持 `PERF_FIO_DIRECT_MATRIX` 与 per-workload direct matrix；JuiceFS `run_juicefs_perf.sh`/`run_juicefs_perf_in_container.sh` 仍主要是单个 `DIRECT` 值。
-- 风险：BrewFS 可以在一个 artifact 中产出 `direct=0/1` 双轨，JuiceFS 需要外部跑两次，artifact 命名、summary 行和 report 口径容易不一致。横向对比时 direct 维度一旦错位，读写缓存结论会失真。
-- 改动建议：JuiceFS runner 补齐与 BrewFS 同名的 `PERF_FIO_DIRECT_MATRIX`、`PERF_FIO_*_DIRECT_MATRIX` 语义；summary/report 把 direct 作为一级维度。
-- 验证：同一工具列表下 BrewFS/JuiceFS 都生成 direct=0/direct=1 两组 summary 行，artifact 中可直接横向 diff。
+- 位置：BrewFS `run_redis_perf.sh`/`run_perf_in_container.sh` 与 JuiceFS `run_juicefs_perf.sh`/`run_juicefs_perf_in_container.sh` 都支持 `PERF_FIO_DIRECT_MATRIX` 与 per-workload `PERF_FIO_*_DIRECT_MATRIX`。
+- 已验证：`docker/compose-xfstests/test_juicefs_direct_matrix.sh` 覆盖 matrix 展开和非法值拦截；小型 compose smoke `docker/compose-xfstests/artifacts/juicefs-perf-run-1781648479-21002` 生成了 `fio-seqwrite-direct0` 与 `fio-seqwrite-direct1` 两条 summary/result。
+- 剩余风险：direct 维度已经能在 artifact 中同构产出，但 BrewFS/JuiceFS 的报告字段仍不完全等价。横向分析时还需要统一 report 首页、fio runtime/wall/drain 字段、cache hygiene 和 JuiceFS stats/drain confidence。
+- 下一步建议：抽共享 fio/report parser 或先让 JuiceFS report 补齐 BrewFS report 的核心字段，使 direct matrix 结果能直接进入 README 对比表。
 
 ### P0 补充：write workload 缺 post-write drain gate
 
@@ -161,4 +161,4 @@
 
 ## Review 结论
 
-当前 runner 已经具备较完整的工具覆盖和 artifact 基础，但“参数可比性”和“指标口径”仍是最大风险。并行审查后最需要优先补齐的是 JuiceFS direct matrix/report 等价能力，以及 write workload 的 post-write drain 账本。近期不建议继续只用单个 fio BW 或单个 artifact 作为优化接受依据。最小可行的下一步是：统一 BrewFS/JuiceFS profile matrix，报告 direct/cache hygiene/drain/wall/tail，并把全场景回归设为优化接受前的必跑项。
+当前 runner 已经具备较完整的工具覆盖和 artifact 基础，但“参数可比性”和“指标口径”仍是最大风险。JuiceFS direct matrix 已补齐，接下来最需要补的是 JuiceFS report 等价能力，以及 write workload 的 post-write drain 账本。近期不建议继续只用单个 fio BW 或单个 artifact 作为优化接受依据。最小可行的下一步是：统一 BrewFS/JuiceFS report 中的 direct/cache hygiene/drain/wall/tail 字段，并把全场景回归设为优化接受前的必跑项。

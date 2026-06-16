@@ -56,6 +56,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Check perf scripts
+        shell: bash
+        run: |
+          bash -n docker/compose-xfstests/run_perf_in_container.sh
+          bash -n docker/compose-xfstests/run_redis_perf.sh
+          bash -n docker/compose-xfstests/run_juicefs_perf_in_container.sh
+          bash -n docker/compose-xfstests/run_juicefs_perf.sh
+          bash docker/compose-xfstests/test_perf_report_delta.sh
+          bash docker/compose-xfstests/test_juicefs_direct_matrix.sh
+
       - name: Check workspace
         run: cargo check --workspace
 
