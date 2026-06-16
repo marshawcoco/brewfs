@@ -464,6 +464,37 @@ directory-handle mode that can prove it will consume the attrs.
 | `readdir` | 65027.3 ops/s | 65385.7 ops/s | reject: target regressed |
 | `rename` | 1904.7 ops/s | 1918.1 ops/s | reject: slight regression |
 
+Open-file cache bookkeeping cleanup check:
+
+```bash
+PERF_LOG_TO_CONSOLE=false CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "metaperf"
+```
+
+Artifact:
+`docker/compose-xfstests/artifacts/perf-run-1781570112-3660`.
+
+The candidate removed unused `OpenFileCache` bookkeeping from
+`src/meta/client/cache.rs`: the duplicate `entries` map, `refs`, and
+`last_check`, and replaced the cached attr lock with `ArcSwap`. The hypothesis
+was that repeated open/close on hot files was spending measurable time in async
+lock writes that did not affect the current fixed-TTL Moka cache semantics.
+`cargo test -p brewfs --lib meta::client` passed, but focused `metaperf` did
+not improve: wall time rose to 194s, `open` fell to 9681.3 ops/s versus the
+nearby focused baselines at 9698.1 and 9776.3 ops/s, and there was no clear
+secondary win. The code and dependency change were reverted.
+
+| Workload | Candidate `perf-run-1781570112-3660` | Reference focused baselines | Decision |
+| --- | ---: | ---: | --- |
+| `metaperf` wall | 194s | 190s / 192s | reject: wall regression |
+| `create` | 1070.6 ops/s | 1060.9 / 1082.8 ops/s | neutral |
+| `open` | 9681.3 ops/s | 9698.1 / 9776.3 ops/s | reject: no open gain |
+| `stat` | 1025805.6 ops/s | 1025026.8 / 1012718.1 ops/s | neutral |
+| `readdir` | 65492.0 ops/s | 65385.7 / 65589.9 ops/s | neutral |
+| `rename` | 1921.9 ops/s | 1918.1 / 1915.3 ops/s | neutral |
+
 Open-file cache time-to-idle check:
 
 ```bash
