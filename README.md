@@ -507,6 +507,58 @@ Latest accepted BrewFS tuning:
 
 Latest rejected tuning checks:
 
+Older FUSE unique append reuse:
+
+```bash
+PERF_LOG_TO_CONSOLE=false CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
+PERF_FIO_BIGWRITE_SIZE=64m PERF_FIO_BIGREAD_SIZE=64m \
+PERF_FIO_SEQREAD_SIZE=128m PERF_FIO_SEQWRITE_SIZE=128m \
+PERF_FIO_RANDREAD_SIZE=128m PERF_FIO_RANDWRITE_SIZE=128m \
+PERF_FIO_RANDRW_SIZE=128m PERF_FIO_SEQREAD_RUNTIME=5 \
+PERF_FIO_SEQWRITE_RUNTIME=5 PERF_FIO_RANDREAD_RUNTIME=5 \
+PERF_FIO_RANDWRITE_RUNTIME=5 PERF_FIO_RANDRW_RUNTIME=5 \
+PERF_METAPERF_SECONDS=8 \
+  bash docker/compose-xfstests/run_redis_perf.sh --s3 \
+  --writeback-throughput-profile \
+  --tools "fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw metaperf"
+```
+
+Artifacts:
+`docker/compose-xfstests/artifacts/perf-run-1781583840-3547` for the BrewFS
+candidate and
+`docker/compose-xfstests/artifacts/juicefs-perf-run-1781584326-14116` for the
+same-parameter JuiceFS comparison.
+
+The candidate allowed an older FUSE `unique` to reuse an existing dirty slice
+when the write was a non-overlapping append, while keeping the older-unique
+guard for overlap writes. The focused TDD checks passed, including the writer
+unit suite after the experiment, but the full short matrix showed unacceptable
+regressions. It improved `fio-randwrite` active bandwidth and p99 latency by
+reducing random-write slice/object amplification, yet it regressed sequential
+write wall time and metadata wall time. The code was reverted; the useful next
+step is a narrower coalescing design or instrumentation that separates append,
+gap-fill, and overlap older-unique rejections before changing ordering behavior.
+
+| Workload | Accepted BrewFS `perf-run-1781581281-3995` | Candidate BrewFS `perf-run-1781583840-3547` | JuiceFS `juicefs-perf-run-1781584326-14116` | Decision |
+| --- | ---: | ---: | ---: | --- |
+| `fio-seqwrite` wall | 49s | 79s | 21s | reject: large wall regression |
+| `fio-seqwrite` active write BW | 1.42 GiB/s | 1.47 GiB/s | 1011.39 MiB/s | active BW neutral, wall worse |
+| `fio-randwrite` wall | 128s | 129s | 72s | wall unchanged |
+| `fio-randwrite` active write BW | 1.35 GiB/s | 1.83 GiB/s | 2.23 GiB/s | promising but insufficient |
+| `fio-randwrite` write p99 | 36.438ms | 26.345ms | 10.813ms | improved |
+| `fio-randrw` wall | 29s | 29s | 6s | unchanged |
+| `fio-randrw` active read/write BW | 995.81 / 454.82 MiB/s | 1.04 GiB/s / 489.16 MiB/s | 1.08 GiB/s / 506.90 MiB/s | active BW closer, wall still behind |
+| `metaperf` wall | 133s | 146s | 148s | reject: metadata wall regression |
+
+The slice/object counters explain the mixed result. `fio-randwrite` slice
+creates dropped from `5521` to `4103`, upload batches from `5908` to `4567`,
+and S3 PUTs from `6185` to `4893`. However, `fio-seqwrite` S3 PUTs increased
+from `2459` to `2869` and partial-tail uploads from `1617` to `1779`, while
+`fio-randrw` S3 PUTs increased from `866` to `962` and partial-tail uploads
+from `379` to `468`. That means simple older-unique append reuse helps one
+random-write path but disturbs flush batching elsewhere, so it is not an
+acceptable default.
+
 Known-empty sparse inode slice-lookup skip:
 
 ```bash
