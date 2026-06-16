@@ -694,6 +694,19 @@ should target writeback slice batching/commit scheduling with explicit mixed
 workload guards, or isolate pure read-cache improvements behind a condition
 that is disabled while mixed writeback is active.
 
+Same-window focused control, 2026-06-16:
+
+A clean default-profile control run,
+`docker/compose-xfstests/artifacts/perf-run-1781613121-5053`, used the same
+`fio-bigread fio-seqread fio-randread fio-randrw` focused matrix with 64MiB
+`fio-bigread`, 128MiB seq/random data, fio `direct=0`, and 5s timed windows.
+It measured `fio-bigread` at 1.24 GiB/s, `fio-seqread` at 2.00 GiB/s,
+`fio-randread` at 1.86 GiB/s, and `fio-randrw` at 982.1 MiB/s read plus
+446.0 MiB/s write. This shows the older accepted full-run baseline is noisy for
+short read/mixed comparisons; future focused candidates should be compared
+against this same-window control first, then promoted to the full BrewFS/JuiceFS
+matrix only if they beat it without material secondary regressions.
+
 Older FUSE unique append reuse:
 
 ```bash
