@@ -834,6 +834,15 @@ where
                         dirty.flush_wait_us,
                         dirty.flush_wait_slices,
                     );
+                    fuse_stats.sync_writeback_flush_fragmentation_metrics(
+                        dirty.flush_fragmentation_ops,
+                        dirty.flush_fragmentation_slices,
+                        dirty.flush_fragmentation_bytes,
+                        dirty.flush_fragmentation_cached_sub_block_slices,
+                        dirty.flush_fragmentation_cached_sub_block_bytes,
+                        dirty.flush_fragmentation_full_block_slices,
+                        dirty.flush_fragmentation_full_block_bytes,
+                    );
                     fuse_stats.sync_writeback_commit_wait_breakdown_metrics(
                         dirty.commit_wait_upload_size_ops,
                         dirty.commit_wait_upload_size_us,

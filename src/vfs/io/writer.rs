@@ -1355,6 +1355,13 @@ struct RecentPendingUploadState {
     flush_wait_ops: AtomicU64,
     flush_wait_us: AtomicU64,
     flush_wait_slices: AtomicU64,
+    flush_fragmentation_ops: AtomicU64,
+    flush_fragmentation_slices: AtomicU64,
+    flush_fragmentation_bytes: AtomicU64,
+    flush_fragmentation_cached_sub_block_slices: AtomicU64,
+    flush_fragmentation_cached_sub_block_bytes: AtomicU64,
+    flush_fragmentation_full_block_slices: AtomicU64,
+    flush_fragmentation_full_block_bytes: AtomicU64,
     slice_create_ops: AtomicU64,
     slice_reuse_ops: AtomicU64,
     slice_reject_older_unique_ops: AtomicU64,
@@ -1451,6 +1458,13 @@ impl RecentPendingUploadState {
             flush_wait_ops: AtomicU64::new(0),
             flush_wait_us: AtomicU64::new(0),
             flush_wait_slices: AtomicU64::new(0),
+            flush_fragmentation_ops: AtomicU64::new(0),
+            flush_fragmentation_slices: AtomicU64::new(0),
+            flush_fragmentation_bytes: AtomicU64::new(0),
+            flush_fragmentation_cached_sub_block_slices: AtomicU64::new(0),
+            flush_fragmentation_cached_sub_block_bytes: AtomicU64::new(0),
+            flush_fragmentation_full_block_slices: AtomicU64::new(0),
+            flush_fragmentation_full_block_bytes: AtomicU64::new(0),
             slice_create_ops: AtomicU64::new(0),
             slice_reuse_ops: AtomicU64::new(0),
             slice_reject_older_unique_ops: AtomicU64::new(0),
@@ -1619,6 +1633,30 @@ impl RecentPendingUploadState {
             Ordering::Relaxed,
         );
         self.flush_wait_slices.fetch_add(slices, Ordering::Relaxed);
+    }
+
+    fn record_flush_fragmentation(
+        &self,
+        slices: u64,
+        bytes: u64,
+        cached_sub_block_slices: u64,
+        cached_sub_block_bytes: u64,
+        full_block_slices: u64,
+        full_block_bytes: u64,
+    ) {
+        self.flush_fragmentation_ops.fetch_add(1, Ordering::Relaxed);
+        self.flush_fragmentation_slices
+            .fetch_add(slices, Ordering::Relaxed);
+        self.flush_fragmentation_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.flush_fragmentation_cached_sub_block_slices
+            .fetch_add(cached_sub_block_slices, Ordering::Relaxed);
+        self.flush_fragmentation_cached_sub_block_bytes
+            .fetch_add(cached_sub_block_bytes, Ordering::Relaxed);
+        self.flush_fragmentation_full_block_slices
+            .fetch_add(full_block_slices, Ordering::Relaxed);
+        self.flush_fragmentation_full_block_bytes
+            .fetch_add(full_block_bytes, Ordering::Relaxed);
     }
 
     fn record_slice_create(&self) {
@@ -2306,6 +2344,39 @@ where
                         .flat_map(|chunk| chunk.slices.iter().cloned())
                         .collect()
                 };
+                let mut snapshot_bytes = 0u64;
+                let mut cached_sub_block_slices = 0u64;
+                let mut cached_sub_block_bytes = 0u64;
+                let mut full_block_slices = 0u64;
+                let mut full_block_bytes = 0u64;
+                for slice in &slices {
+                    let state = slice.lock();
+                    let len = state.data.len();
+                    snapshot_bytes = snapshot_bytes.saturating_add(len);
+                    let block_size = state.data.block_size() as u64;
+                    if matches!(state.write_origin_kind(), WriteOriginKind::CachedOnly)
+                        && len < block_size
+                    {
+                        cached_sub_block_slices += 1;
+                        cached_sub_block_bytes = cached_sub_block_bytes.saturating_add(len);
+                    }
+                    if len >= block_size && len % block_size == 0 {
+                        full_block_slices += 1;
+                        full_block_bytes = full_block_bytes.saturating_add(len);
+                    }
+                }
+                if !slices.is_empty() {
+                    self.shared
+                        .recent_pending_upload
+                        .record_flush_fragmentation(
+                            slices.len() as u64,
+                            snapshot_bytes,
+                            cached_sub_block_slices,
+                            cached_sub_block_bytes,
+                            full_block_slices,
+                            full_block_bytes,
+                        );
+                }
                 captured_slices = captured_slices.saturating_add(slices.len() as u64);
 
                 // Freeze any that are still writable and kick off their uploads.
@@ -3766,6 +3837,13 @@ pub(crate) struct WritebackDirtyBreakdown {
     pub flush_wait_ops: u64,
     pub flush_wait_us: u64,
     pub flush_wait_slices: u64,
+    pub flush_fragmentation_ops: u64,
+    pub flush_fragmentation_slices: u64,
+    pub flush_fragmentation_bytes: u64,
+    pub flush_fragmentation_cached_sub_block_slices: u64,
+    pub flush_fragmentation_cached_sub_block_bytes: u64,
+    pub flush_fragmentation_full_block_slices: u64,
+    pub flush_fragmentation_full_block_bytes: u64,
     pub slice_create_ops: u64,
     pub slice_reuse_ops: u64,
     pub slice_reject_older_unique_ops: u64,
@@ -4013,6 +4091,34 @@ where
             flush_wait_slices: self
                 .recent_pending_upload
                 .flush_wait_slices
+                .load(Ordering::Relaxed),
+            flush_fragmentation_ops: self
+                .recent_pending_upload
+                .flush_fragmentation_ops
+                .load(Ordering::Relaxed),
+            flush_fragmentation_slices: self
+                .recent_pending_upload
+                .flush_fragmentation_slices
+                .load(Ordering::Relaxed),
+            flush_fragmentation_bytes: self
+                .recent_pending_upload
+                .flush_fragmentation_bytes
+                .load(Ordering::Relaxed),
+            flush_fragmentation_cached_sub_block_slices: self
+                .recent_pending_upload
+                .flush_fragmentation_cached_sub_block_slices
+                .load(Ordering::Relaxed),
+            flush_fragmentation_cached_sub_block_bytes: self
+                .recent_pending_upload
+                .flush_fragmentation_cached_sub_block_bytes
+                .load(Ordering::Relaxed),
+            flush_fragmentation_full_block_slices: self
+                .recent_pending_upload
+                .flush_fragmentation_full_block_slices
+                .load(Ordering::Relaxed),
+            flush_fragmentation_full_block_bytes: self
+                .recent_pending_upload
+                .flush_fragmentation_full_block_bytes
                 .load(Ordering::Relaxed),
             slice_create_ops: self
                 .recent_pending_upload
@@ -4582,6 +4688,44 @@ mod tests {
         assert_eq!(state.flush_wait_ops.load(Ordering::Relaxed), 1);
         assert_eq!(state.flush_wait_us.load(Ordering::Relaxed), 55);
         assert_eq!(state.flush_wait_slices.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_flush_fragmentation_metrics_track_cached_sub_block_slices() {
+        let state = RecentPendingUploadState::new();
+
+        state.record_flush_fragmentation(3, 10 * 1024, 2, 2 * 1024, 1, 8 * 1024);
+
+        assert_eq!(state.flush_fragmentation_ops.load(Ordering::Relaxed), 1);
+        assert_eq!(state.flush_fragmentation_slices.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            state.flush_fragmentation_bytes.load(Ordering::Relaxed),
+            10 * 1024
+        );
+        assert_eq!(
+            state
+                .flush_fragmentation_cached_sub_block_slices
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            state
+                .flush_fragmentation_cached_sub_block_bytes
+                .load(Ordering::Relaxed),
+            2 * 1024
+        );
+        assert_eq!(
+            state
+                .flush_fragmentation_full_block_slices
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .flush_fragmentation_full_block_bytes
+                .load(Ordering::Relaxed),
+            8 * 1024
+        );
     }
 
     #[test]
