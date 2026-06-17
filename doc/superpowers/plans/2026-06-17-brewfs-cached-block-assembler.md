@@ -4,6 +4,10 @@
 
 **Goal:** Reduce BrewFS explicit-flush partial-tail amplification by adding a feature-gated cached-write block assembler inspired by JuiceFS, then accept it only if local CI and full BrewFS/JuiceFS perf show a real write-path gain without read, randrw, metadata, or POSIX regressions.
 
+**Goal Addendum:** Every future performance iteration must reproduce the local CI `Test workspace` gate before perf evidence is accepted. A change that has not passed `cargo fmt --all --check` and `cargo test --workspace --lib --bins` in this worktree is not eligible for README benchmark updates, commits as a performance improvement, or comparison claims against JuiceFS.
+
+**Goal Addendum Verification:** After reverting the rejected writer wiring, the current worktree passed the local CI test gate with `CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins`: `510 passed; 0 failed; 159 ignored`.
+
 **Architecture:** JuiceFS keeps page writes in a `wSlice`, uploads full blocks with `FlushTo`, and only finalizes the partial tail on `Flush`/`Close`; BrewFS currently turns many FUSE writeback-cache page writes into independent `SliceState`s, so explicit flush often stages and commits thousands of small cached-only tails. This plan adds a separate cached-write assembler that buffers page-sized cached writes per inode/chunk/block, emits full-block slices as soon as they are complete, and drains remaining partial runs only at explicit flush/truncate/close. The existing `SliceState` path remains the default until perf and correctness gates prove the assembler is safe.
 
 **Tech Stack:** Rust, Tokio, BrewFS `src/vfs/io/writer.rs`, `src/vfs/fs/mod.rs`, `src/vfs/config.rs`, existing Redis/S3 Docker perf runners, local GitHub Actions `Test workspace` reproduction.
@@ -35,7 +39,7 @@ The next attempt must change the representation of cached page writes before the
 
 ## Acceptance Gate
 
-Every accepted code change in this plan must pass this local CI gate before perf numbers count:
+Every accepted code change in this plan must pass this local CI gate before perf numbers count. This is now part of the active optimization goal, not an optional clean-up step:
 
 ```bash
 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo fmt --all --check
@@ -467,6 +471,22 @@ cargo test -p brewfs vfs::io::writer::tests::test_cached_block_assembler_emits_o
 ```
 
 Expected: pass.
+
+**2026-06-17 rejected attempt:** A minimal writer wiring attempt passed the focused regression test, cached assembler unit tests, config tests, `cargo fmt --all --check`, `git diff --check`, and local CI equivalent:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins
+```
+
+It finished with `511 passed; 0 failed; 159 ignored`, then failed the perf acceptance gate and was reverted. Focused BrewFS artifact: `docker/compose-xfstests/artifacts/perf-run-1781692642-30426`.
+
+| Tool | Baseline artifact | Rejected attempt | Decision signal |
+| --- | ---: | ---: | --- |
+| `fio-seqwrite` | `126.15 MiB/s`, `130s` | `122.69 MiB/s`, `137s` | Worse active bandwidth and wall time |
+| `fio-randwrite` | `204.58 MiB/s`, `131s` | `171.05 MiB/s`, `131s` | Clear active bandwidth regression |
+| `fio-randrw` | read `914.30 MiB/s`, write `409.37 MiB/s`, `143s` | read `985.20 MiB/s`, write `441.76 MiB/s`, `142s` | Mixed gain, not enough to offset pure-write regression |
+
+The simple per-block assembler only helped a narrow out-of-order page model. Real fio still emitted very high cached sub-block and partial-tail counts, including `flush_fragmentation_slices_total 16646` for `fio-seqwrite` and partial-tail ratios near `0.95` to `0.97` for write-heavy tools. Do not repeat this exact writer-level assembly approach; the next attempt must assemble or defer cached partials at a wider flush-aware extent boundary before many `SliceState`s exist.
 
 ## Task 5: Drain Assembler On Flush, Truncate, And Cleanup
 
