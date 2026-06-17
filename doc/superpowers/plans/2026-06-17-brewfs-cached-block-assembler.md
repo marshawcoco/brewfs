@@ -234,7 +234,7 @@ Task 1 verification on 2026-06-17:
 - Modify: `src/vfs/io/mod.rs`
 - Test: `src/vfs/io/cached_block_assembler.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create tests for the pure model before wiring it into `FileWriter`:
 
@@ -283,7 +283,7 @@ fn assembler_truncate_drops_tail_pages() {
 }
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -293,7 +293,7 @@ cargo test -p brewfs vfs::io::cached_block_assembler
 
 Expected: fails because the module and types do not exist.
 
-- [ ] **Step 3: Implement the pure model**
+- [x] **Step 3: Implement the pure model**
 
 Implement `CachedBlockAssembler` as an in-memory per-chunk page map:
 
@@ -322,7 +322,7 @@ pub(crate) enum AssemblerWriteError {
 
 The first implementation should support only page-aligned cached writes whose length is at most one page. Return `OlderOverlap` if an incoming unique is lower than an existing overlapping page unique. This intentionally preserves the correctness boundary that made the simple older-unique reuse candidate unsafe.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -331,6 +331,15 @@ cargo test -p brewfs vfs::io::cached_block_assembler
 ```
 
 Expected: pass.
+
+Task 2 verification on 2026-06-17:
+
+- RED: `CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test -p brewfs vfs::io::cached_block_assembler` failed because `CachedBlockAssembler` and `AssemblerWriteError` were missing.
+- GREEN: the same focused command passed with `4 passed; 0 failed` in both `src/lib.rs` and `src/main.rs` unit test targets.
+- `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- Local CI `Test workspace` equivalent passed: `CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins` finished with `509 passed; 0 failed; 159 ignored`.
+- Perf was not run for Task 2 because this is an unconnected pure model and does not change runtime write-path behavior.
 
 ## Task 3: Feature-Gate The Assembler Configuration
 
