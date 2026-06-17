@@ -805,6 +805,30 @@ Artifact: `docker/compose-xfstests/artifacts/perf-run-1781659194-5941`
 | --- | --- | --- | --- | --- |
 | Async writer retry outside the writer lock | `fio-seqwrite fio-randwrite fio-randrw` | wall improved versus the latest full accepted snapshot: seqwrite 140s -> 134s, randwrite 145s -> 134s, randrw 163s -> 150s; randwrite BW 112.3 -> 129.6 MiB/s; randrw R/W 230.8/103.5 -> 269.9/121.4 MiB/s | seqwrite active BW slipped 76.2 -> 73.3 MiB/s; randwrite p99 regressed 34.9ms -> 206.6ms; no `write_at retried` log appeared, so the intended rare retry path was not exercised | reject: the target path was not validated and the randwrite p99 regression violates the mixed/write guard |
 
+2026-06-17 dirty-overlay snapshot filter check:
+
+The candidate changed `FileWriter::overlay_dirty_impl` to collect only dirty
+slices that overlapped the read span instead of cloning every live and
+recently-committed slice in the chunk before checking overlap. It targeted the
+focused `tools/perf` baseline where folded on-CPU samples showed
+`overlay_dirty_impl` and `Vec::from_iter` on the mixed read/write path. The
+local Rust CI gate passed before perf (`cargo fmt --all --check`, perf script
+checks, `cargo check --workspace`, `cargo build --workspace`, BrewFS FUSE
+feature checks, `cargo test --workspace --lib --bins`, and
+`cargo clippy --workspace`), including `cargo test --workspace --lib --bins`
+with `503 passed; 0 failed; 159 ignored`. The code was rejected and reverted
+because the single-workload random-write guard regressed materially and the
+candidate profiling run did not capture BrewFS symbols, so it did not prove the
+intended CPU hotspot was removed.
+
+Baseline artifact: `tools/perf/results/20260617-014058`
+
+Candidate artifact: `tools/perf/results/20260617-020000`
+
+| Candidate | Focused tools | Positive signal | Regression | Decision |
+| --- | --- | --- | --- | --- |
+| Dirty-overlay overlap-only snapshot | `tools/perf` `fio-randwrite fio-randrw` quick on-CPU profile | `fio-randrw` improved from R 1.12 GiB/s / W 516.0 MiB/s to R 1.49 GiB/s / W 678.5 MiB/s; mixed write p99 improved 28.18ms -> 13.57ms and p99.9 improved 734ms -> 117.96ms | `fio-randwrite` write BW regressed 672.1 -> 527.8 MiB/s; write p99 regressed 248.51ms -> 396.36ms and p99.9 regressed 2.67s -> 3.14s; candidate run reported no BrewFS on-CPU samples | reject: mixed-workload gain is not accepted when standalone random-write throughput and tail latency regress, especially without symbol-level proof |
+
 The DataFetcher single-block candidate artifact is
 `docker/compose-xfstests/artifacts/perf-run-1781630677-14774`; its same-parameter
 JuiceFS focused comparison is
