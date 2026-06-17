@@ -927,6 +927,26 @@ Artifact: `docker/compose-xfstests/artifacts/perf-run-1781659194-5941`
 | --- | --- | --- | --- | --- |
 | Async writer retry outside the writer lock | `fio-seqwrite fio-randwrite fio-randrw` | wall improved versus the latest full accepted snapshot: seqwrite 140s -> 134s, randwrite 145s -> 134s, randrw 163s -> 150s; randwrite BW 112.3 -> 129.6 MiB/s; randrw R/W 230.8/103.5 -> 269.9/121.4 MiB/s | seqwrite active BW slipped 76.2 -> 73.3 MiB/s; randwrite p99 regressed 34.9ms -> 206.6ms; no `write_at retried` log appeared, so the intended rare retry path was not exercised | reject: the target path was not validated and the randwrite p99 regression violates the mixed/write guard |
 
+2026-06-17 commit wait missed-notify recheck:
+
+The candidate shortened the `commit_chunk.wait_upload` missed-notify poll from
+100ms to 10ms after a focused TDD guard reproduced a stage-ready slice waiting
+about 91ms before commit. The local CI `Test workspace` command passed before
+perf:
+`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins`
+(`505 passed; 0 failed; 159 ignored` for BrewFS, plus `brewfs_stats` with no
+tests). Direct=1 focused perf rejected the change:
+`docker/compose-xfstests/artifacts/perf-run-1781680401-28154`.
+
+Against direct1 baseline
+`docker/compose-xfstests/artifacts/perf-run-1781675169-19566`, seqwrite active
+BW improved, but `fio-randrw` active+drain regressed `146.7s -> 148.1s`,
+read/write BW fell `126.0/56.6 -> 122.6/55.3 MiB/s`, and randwrite p99.9 jumped
+to `3103.8ms`. Internal counters showed the main side effect:
+`commit_wait_upload_ops` grew roughly `44k -> 406k` while total commit wait did
+not fall. The code was reverted; do not retry a shorter fixed poll without an
+event-driven wakeup or batching design that avoids wakeup amplification.
+
 2026-06-17 dirty-overlay snapshot filter check:
 
 The candidate changed `FileWriter::overlay_dirty_impl` to collect only dirty
