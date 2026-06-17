@@ -947,6 +947,23 @@ to `3103.8ms`. Internal counters showed the main side effect:
 not fall. The code was reverted; do not retry a shorter fixed poll without an
 event-driven wakeup or batching design that avoids wakeup amplification.
 
+Follow-up direct=1 registered-waiter variant:
+`docker/compose-xfstests/artifacts/perf-run-1781682309-19710` kept the 100ms
+watchdog but registered the `Notify` waiter before rechecking slice readiness.
+The local CI test gate passed before perf (`cargo fmt --all --check`,
+`git diff --check`, and
+`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins`).
+It was also rejected and reverted. Against the same direct=1 baseline
+`perf-run-1781675169-19566`, `fio-randrw` active+drain improved only
+`146.7s -> 143.6s`, while `fio-seqwrite` regressed `41.8s -> 78.1s`
+because post-write drain grew `2s -> 30s`, and `fio-randwrite` regressed
+`150.6s -> 155.7s` with p99.9 write latency jumping `88.6ms -> 17112.8ms`.
+The root signal was wakeup amplification: `fio-randrw`
+`commit_wait_upload_ops` grew from `43932` to `10620002`, and seqwrite
+post-drain commit-wait ops grew from `2173` to `7105083`. Do not retry a
+registered-waiter recheck unless it also coalesces or filters notifications by
+actual slice state transition.
+
 2026-06-17 dirty-overlay snapshot filter check:
 
 The candidate changed `FileWriter::overlay_dirty_impl` to collect only dirty
