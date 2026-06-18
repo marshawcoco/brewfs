@@ -1846,3 +1846,62 @@ Updated next target:
 - Split the current dirty runtime changes into correctness-only versus performance-sensitive pieces before considering commits.
 - For performance work, isolate the writer overlay/epoch changes with a clean A/B full run or a narrower `randrw` diagnostic before accepting any writer changes.
 - For metadata parity with JuiceFS, shift from cache seeding guesses to Redis commandstats/Lua transaction accounting around `open`, `create`, and `rename`.
+
+### Round 14: fair-profile audit before next code optimization
+
+Parameter audit result:
+
+An explorer audited the BrewFS and JuiceFS perf runners plus these artifacts:
+
+- BrewFS kept baseline: `docker/compose-xfstests/artifacts/perf-run-1781737544-9539`
+- BrewFS dirty runtime candidate: `docker/compose-xfstests/artifacts/perf-run-1781752756-6134`
+- JuiceFS current comparison: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781753890-18033`
+
+Conclusion: the fio workload parameters are aligned for the current buffered profile, but the full comparison profile was not fully aligned.
+
+Confirmed aligned fio parameters:
+
+- `PERF_FIO_DIRECT=0`
+- `PERF_FIO_IOENGINE=io_uring`
+- `PERF_FIO_IODEPTH=1`
+- `fio-bigread` / `fio-bigwrite`: `128m`, `numjobs=8`
+- `fio-seqread` / `fio-seqwrite`: `1g`, `numjobs=1`, `runtime=60`
+- `fio-randread` / `fio-randwrite` / `fio-randrw`: `512m`, `numjobs=4`, `runtime=60`
+- `fio-randrw`: `rwmixread=70`
+
+Found gaps:
+
+- `run_juicefs_perf.sh` did not pass through `PERF_FIO_DIRECT_MATRIX` or per-profile `PERF_FIO_*_DIRECT_MATRIX`, while BrewFS already did.
+- `run_juicefs_perf_in_container.sh` wrote `PERF_FIO_DIRECT_MATRIX` to `perf-profile.env` but did not expand it into `fio-*-direct0` / `fio-*-direct1` runs.
+- `JFS_MAX_DOWNLOADS=16` was exported by the profile, but the current JuiceFS image does not support `--max-downloads`, so the runner skipped it repeatedly.
+- BrewFS max-performance profile still enables `BREWFS_VERIFY_CACHE_CHECKSUM=full`, which may be a deliberate integrity profile rather than the absolute max-throughput profile. It must be reported explicitly in every comparison.
+- Neither side drops kernel page cache in the current buffered profile (`PERF_FIO_DROP_CACHES=false` and `PERF_FIO_COLD_READ_DROP_CACHES=false`), so the current profile measures FUSE/filesystem cache behavior rather than strict backend cold-read behavior.
+
+Harness fix:
+
+- `docker/compose-xfstests/run_juicefs_perf.sh` now passes the global and per-profile fio direct-matrix variables into the JuiceFS perf container.
+- `docker/compose-xfstests/run_juicefs_perf_in_container.sh` now expands direct matrix runs the same way as the BrewFS runner and records `JFS_MAX_DOWNLOADS_EFFECTIVE` in artifacts.
+- `tests/scripts/test_perf_profile_harness.sh` now verifies the JuiceFS direct-matrix path and the effective max-downloads artifact key.
+
+Verification:
+
+```bash
+bash tests/scripts/test_perf_profile_harness.sh
+bash -n docker/compose-xfstests/run_juicefs_perf.sh
+bash -n docker/compose-xfstests/run_juicefs_perf_in_container.sh
+bash -n tests/scripts/test_perf_profile_harness.sh
+```
+
+Next BrewFS optimization target:
+
+Do not add another cache-seeding change until Redis commandstats prove the exact extra round trip. The next code round should run metadata-only commandstats probes for `create`, `open`, and `rename` against BrewFS and inspect JuiceFS `meta.Redis` reference behavior:
+
+- JuiceFS `Lookup`, `Create`, `Rename`, and `Open` fill `Attr` directly through the metadata API.
+- BrewFS Redis store already has Lua paths for `lookup_with_attr`, `create_file`, and `rename`, but full `metaperf` still shows `create` at about 46% of JuiceFS, `open` at about 40%, and `rename` at about 70%.
+- Therefore the next measurable hypothesis is: BrewFS still performs extra Redis commands outside the Lua critical path or invalidates enough local metadata state to force follow-up `GET/HGET/EVALSHA` calls during `create/open/rename`.
+
+Acceptance gate for the next code change:
+
+- Run focused Redis commandstats tests before and after the change.
+- Run the full BrewFS and JuiceFS perf contract again.
+- Keep only if the targeted metadata op improves by at least 5% and no fio or metadata scenario regresses by more than 5% versus the kept BrewFS baseline.

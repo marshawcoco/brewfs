@@ -63,6 +63,10 @@ juicefs_mount_supports() {
 
 write_perf_profile() {
     local path="$artifact_dir/perf-profile.env"
+    local max_downloads_effective="$jfs_max_downloads"
+    if [[ -n "$jfs_max_downloads" ]] && ! juicefs_mount_supports "--max-downloads"; then
+        max_downloads_effective="unsupported"
+    fi
     cat >"$path" <<EOF
 PERF_TOOLS=${perf_tools}
 PERF_FIO_DIRECT=${PERF_FIO_DIRECT:-0}
@@ -81,6 +85,7 @@ JFS_BUFFER_SIZE_MIB=${jfs_buffer_size_mib}
 JFS_CACHE_SIZE_MIB=${jfs_cache_size_mib}
 JFS_MAX_UPLOADS=${jfs_max_uploads}
 JFS_MAX_DOWNLOADS=${jfs_max_downloads}
+JFS_MAX_DOWNLOADS_EFFECTIVE=${max_downloads_effective}
 JFS_OPEN_CACHE=${jfs_open_cache}
 JFS_OPEN_CACHE_LIMIT=${jfs_open_cache_limit}
 JFS_BACKUP_META=${jfs_backup_meta}
@@ -96,6 +101,10 @@ EOF
 }
 
 write_juicefs_profile() {
+    local max_downloads_effective="$jfs_max_downloads"
+    if [[ -n "$jfs_max_downloads" ]] && ! juicefs_mount_supports "--max-downloads"; then
+        max_downloads_effective="unsupported"
+    fi
     cat >"$artifact_dir/juicefs-profile.env" <<EOF
 JFS_COMPRESS=${jfs_compress}
 JFS_WRITEBACK=${jfs_writeback}
@@ -103,6 +112,7 @@ JFS_BUFFER_SIZE_MIB=${jfs_buffer_size_mib}
 JFS_CACHE_SIZE_MIB=${jfs_cache_size_mib}
 JFS_MAX_UPLOADS=${jfs_max_uploads}
 JFS_MAX_DOWNLOADS=${jfs_max_downloads}
+JFS_MAX_DOWNLOADS_EFFECTIVE=${max_downloads_effective}
 JFS_OPEN_CACHE=${jfs_open_cache}
 JFS_OPEN_CACHE_LIMIT=${jfs_open_cache_limit}
 JFS_BACKUP_META=${jfs_backup_meta}
@@ -458,28 +468,63 @@ run_fio_custom() {
 run_fio_profile() {
     local tool="$1"
     local mode="$2"
+    local direct_override="${3:-}"
+    local profile_key_override="${4:-}"
     local work_dir="$mount_dir/.perf-${tool}"
     local json_path="$artifact_dir/results/${tool}.json"
     local profile_suffix="${tool#fio-}"
-    local profile_key=$(printf '%s' "$profile_suffix" | tr '[:lower:]-' '[:upper:]_')
-    local profile_args_var="PERF_FIO_${profile_key}_ARGS"
-    local name_var="PERF_FIO_${profile_key}_NAME"
-    local rw_var="PERF_FIO_${profile_key}_RW"
-    local rwmixread_var="PERF_FIO_${profile_key}_RWMIXREAD"
-    local bs_var="PERF_FIO_${profile_key}_BS"
-    local size_var="PERF_FIO_${profile_key}_SIZE"
-    local numjobs_var="PERF_FIO_${profile_key}_NUMJOBS"
-    local ioengine_var="PERF_FIO_${profile_key}_IOENGINE"
-    local iodepth_var="PERF_FIO_${profile_key}_IODEPTH"
-    local direct_var="PERF_FIO_${profile_key}_DIRECT"
-    local runtime_var="PERF_FIO_${profile_key}_RUNTIME"
-
+    local profile_key
+    local profile_args_var
+    local name_var
+    local rw_var
+    local rwmixread_var
+    local bs_var
+    local size_var
+    local numjobs_var
+    local ioengine_var
+    local iodepth_var
+    local direct_var
+    local runtime_var
     local name rw rwmixread bs size numjobs ioengine iodepth direct runtime
     local needs_prefill=false
     local use_time_based=true
     local use_end_fsync=false
     local use_refill_buffers=false
     local -a args=()
+
+    if [[ -n "$profile_key_override" ]]; then
+        profile_key="$profile_key_override"
+    else
+        profile_key="$(printf '%s' "$profile_suffix" | tr '[:lower:]-' '[:upper:]_')"
+    fi
+    profile_args_var="PERF_FIO_${profile_key}_ARGS"
+    name_var="PERF_FIO_${profile_key}_NAME"
+    rw_var="PERF_FIO_${profile_key}_RW"
+    rwmixread_var="PERF_FIO_${profile_key}_RWMIXREAD"
+    bs_var="PERF_FIO_${profile_key}_BS"
+    size_var="PERF_FIO_${profile_key}_SIZE"
+    numjobs_var="PERF_FIO_${profile_key}_NUMJOBS"
+    ioengine_var="PERF_FIO_${profile_key}_IOENGINE"
+    iodepth_var="PERF_FIO_${profile_key}_IODEPTH"
+    direct_var="PERF_FIO_${profile_key}_DIRECT"
+    runtime_var="PERF_FIO_${profile_key}_RUNTIME"
+
+    local direct_matrix_var="PERF_FIO_${profile_key}_DIRECT_MATRIX"
+    local direct_matrix="${!direct_matrix_var:-${PERF_FIO_DIRECT_MATRIX:-}}"
+    if [[ -z "$direct_override" && -z "${!profile_args_var:-}" && -n "$direct_matrix" ]]; then
+        local direct_value matrix_status=0
+        for direct_value in $direct_matrix; do
+            case "$direct_value" in
+                0|1) ;;
+                *)
+                    err "无效的 fio direct matrix 值: $direct_value (只支持 0 或 1)"
+                    return 1
+                    ;;
+            esac
+            run_fio_profile "${tool}-direct${direct_value}" "$mode" "$direct_value" "$profile_key" || matrix_status=1
+        done
+        return "$matrix_status"
+    fi
 
     rm -rf "$work_dir"
     mkdir -p "$work_dir"
@@ -496,7 +541,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 1)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="$(env_or_default "$runtime_var" PERF_FIO_RUNTIME 60)"
                 needs_prefill=true
                 ;;
@@ -508,7 +553,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 1)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="$(env_or_default "$runtime_var" PERF_FIO_RUNTIME 60)"
                 ;;
             randread)
@@ -519,7 +564,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 4)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="$(env_or_default "$runtime_var" PERF_FIO_RUNTIME 60)"
                 needs_prefill=true
                 ;;
@@ -531,7 +576,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 4)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="$(env_or_default "$runtime_var" PERF_FIO_RUNTIME 60)"
                 ;;
             randrw)
@@ -543,7 +588,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 4)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="$(env_or_default "$runtime_var" PERF_FIO_RUNTIME 60)"
                 needs_prefill=true
                 ;;
@@ -555,7 +600,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 8)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="0"
                 use_time_based=false
                 use_end_fsync=true
@@ -569,7 +614,7 @@ run_fio_profile() {
                 numjobs="$(env_or_default "$numjobs_var" PERF_FIO_NUMJOBS 8)"
                 ioengine="$(env_or_default "$ioengine_var" PERF_FIO_IOENGINE io_uring)"
                 iodepth="$(env_or_default "$iodepth_var" PERF_FIO_IODEPTH 1)"
-                direct="$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)"
+                direct="${direct_override:-$(env_or_default "$direct_var" PERF_FIO_DIRECT 0)}"
                 runtime="0"
                 use_time_based=false
                 use_refill_buffers=true

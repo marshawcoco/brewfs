@@ -56,6 +56,7 @@ assert_file_not_contains "$redis_runner" 'BREWFS_COMPRESSION="${BREWFS_COMPRESSI
 common_keys=(
     PERF_TOOLS
     PERF_FIO_DIRECT
+    PERF_FIO_DIRECT_MATRIX
     PERF_FIO_IOENGINE
     PERF_FIO_IODEPTH
     PERF_FIO_PREFILL_DRAIN
@@ -83,10 +84,16 @@ assert_manifest_keys "$juicefs_container" \
     JFS_COMPRESS \
     JFS_WRITEBACK \
     JFS_MAX_UPLOADS \
+    JFS_MAX_DOWNLOADS_EFFECTIVE \
     JFS_OPEN_CACHE \
     JFS_OPEN_CACHE_LIMIT
 
 assert_runner_console_capture "$redis_runner"
 assert_runner_console_capture "$juicefs_runner"
+
+assert_file_contains "$juicefs_runner" "PERF_FIO_DIRECT_MATRIX=\"0 1\""
+assert_file_contains "$juicefs_runner" "PERF_FIO_SEQREAD_DIRECT_MATRIX"
+assert_file_contains "$juicefs_runner" "PERF_FIO_BIGWRITE_DIRECT_MATRIX"
+assert_file_contains "$juicefs_container" 'run_fio_profile "${tool}-direct${direct_value}"'
 
 echo "perf profile harness checks passed"
