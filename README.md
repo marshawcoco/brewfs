@@ -59,33 +59,34 @@ Current Redis + S3-compatible RustFS perf runs use `fio` with `io_uring`, `iodep
 
 Artifacts:
 
-- BrewFS latest full run: `docker/compose-xfstests/artifacts/perf-run-1781737544-9539`
-- JuiceFS latest full run: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781742886-30236`
+- BrewFS kept full run: `docker/compose-xfstests/artifacts/perf-run-1781737544-9539`
+- JuiceFS latest full run: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781746334-9398`
+- Latest rejected BrewFS A/B: `docker/compose-xfstests/artifacts/perf-run-1781745250-11404`
 - JuiceFS clean planning target: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781732616-8549`
 
-These artifacts include `perf-profile.env`, `runner-console.log`, and `runner-warning-summary.tsv`, which record the effective fio/filesystem tuning and flag noisy runs. The latest JuiceFS run completed with the aligned profile, but its writeback/cache path produced 3445 `WARNING` lines, 3418 timeout matches, 17 slow requests, and 9 slow operations, so the clean JuiceFS artifact remains the stable planning target. The table below reports the current kept BrewFS profile against the latest JuiceFS run and marks noisy writeback-sensitive results accordingly.
+These artifacts include `perf-profile.env`, `runner-console.log`, and `runner-warning-summary.tsv`, which record the effective fio/filesystem tuning and flag noisy runs. The latest JuiceFS run completed with the aligned profile, but its writeback/cache path produced 4008 `WARNING` lines, 3991 timeout matches, 8 slow requests, and 5 slow operations, so the clean JuiceFS artifact remains the stable planning target. The table below reports the current kept BrewFS profile against the latest JuiceFS run and marks noisy writeback-sensitive results accordingly.
 
 | fio tool | BrewFS MiB/s | JuiceFS MiB/s | BrewFS / JuiceFS |
 | --- | ---: | ---: | ---: |
-| `fio-bigread` | R 628.2 / W 0.0 | R 2403.8 / W 0.0 | 26.1% |
-| `fio-bigwrite` | R 0.0 / W 1149.3 | R 0.0 / W 3313.9 | 34.7% |
-| `fio-seqread` | R 1754.0 / W 0.0 | R 2520.6 / W 0.0 | 69.6% |
-| `fio-seqwrite` | R 0.0 / W 69.2 | R 0.0 / W 256.7 | 27.0% |
-| `fio-randread` | R 774.0 / W 0.0 | R 3293.4 / W 0.0 | 23.5% |
-| `fio-randwrite` | R 0.0 / W 73.3 | R 0.0 / W 287.5 | 25.5% |
-| `fio-randrw` | R 253.4 / W 113.8 | R 175.7 / W 80.6 | R 144.2% / W 141.1% |
+| `fio-bigread` | R 628.2 / W 0.0 | R 2398.1 / W 0.0 | 26.2% |
+| `fio-bigwrite` | R 0.0 / W 1149.3 | R 0.0 / W 3271.6 | 35.1% |
+| `fio-seqread` | R 1754.0 / W 0.0 | R 2508.7 / W 0.0 | 69.9% |
+| `fio-seqwrite` | R 0.0 / W 69.2 | R 0.0 / W 255.9 | 27.0% |
+| `fio-randread` | R 774.0 / W 0.0 | R 3310.8 / W 0.0 | 23.4% |
+| `fio-randwrite` | R 0.0 / W 73.3 | R 0.0 / W 297.3 | 24.7% |
+| `fio-randrw` | R 253.4 / W 113.8 | R 184.2 / W 83.4 | R 137.6% / W 136.5% |
 
 | metadata op | BrewFS ops/s | JuiceFS ops/s | BrewFS / JuiceFS |
 | --- | ---: | ---: | ---: |
-| create | 629.9 | 1310.7 | 48.1% |
-| open | 9271.0 | 23531.9 | 39.4% |
-| stat | 1022440.1 | 1030453.5 | 99.2% |
-| readdir | 64070.5 | 66741.5 | 96.0% |
-| rename | 1903.7 | 2727.0 | 69.8% |
+| create | 629.9 | 1365.5 | 46.1% |
+| open | 9271.0 | 23568.2 | 39.3% |
+| stat | 1022440.1 | 1018695.1 | 100.4% |
+| readdir | 64070.5 | 67605.3 | 94.8% |
+| rename | 1903.7 | 2720.8 | 70.0% |
 
 Current interpretation: BrewFS is near parity for `stat` and `readdir`, competitive on noisy `randrw`, but still trails JuiceFS heavily on random/cold reads, pure writes, `create`, `open`, and `rename`. The next tuning rounds focus on file-to-file metadata open/create/rename overhead and writeback partial-tail aggregation while preserving the full scenario regression budget.
 
-Latest rejected A/B: `docker/compose-xfstests/artifacts/perf-run-1781741772-12024` removed the post-rename eager preload in `MetaClient::rename`. It improved `rename` only from 1903.7 to 1914.7 ops/s and `randwrite` from 73.3 to 88.1 MiB/s, but regressed `bigread` to 596.4 MiB/s, `seqread` to 1630.2 MiB/s, `randrw` to R 166.3 / W 74.7 MiB/s, and `create` to 568.8 ops/s. The code change was reverted. Earlier rejected A/B `docker/compose-xfstests/artifacts/perf-run-1781739942-2326` disabled BrewFS cache checksum verification; it improved `bigread` but regressed `randrw` and `create`, so the main snapshot keeps full checksum verification enabled.
+Latest rejected A/B: `docker/compose-xfstests/artifacts/perf-run-1781745250-11404` seeded the open-file metadata cache from `open_with_cached_attr` to mimic JuiceFS create-open behavior. It did not improve the target metadata path: `create` fell from 629.9 to 596.2 ops/s and `open` fell from 9271.0 to 9160.8 ops/s, while `randread` fell to 713.4 MiB/s and `randrw` fell to R 213.4 / W 95.6 MiB/s. The code change was reverted. Earlier rejected A/B `docker/compose-xfstests/artifacts/perf-run-1781741772-12024` removed the post-rename eager preload in `MetaClient::rename`; it improved `rename` only by 0.6% and regressed read/mixed workloads. Earlier rejected A/B `docker/compose-xfstests/artifacts/perf-run-1781739942-2326` disabled BrewFS cache checksum verification; it improved `bigread` but regressed `randrw` and `create`, so the main snapshot keeps full checksum verification enabled.
 
 ## Quick Start
 

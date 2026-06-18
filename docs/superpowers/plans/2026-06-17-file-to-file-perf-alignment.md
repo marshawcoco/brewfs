@@ -1522,3 +1522,109 @@ Updated next target:
 - Do not pursue checksum-none as the main fix.
 - For file-to-file metadata, focus on the repeated `rename` and `create` round trips: FUSE already resolves/validates source and destination, VFS repeats lookup/stat, and `MetaClient::rename` repeats cached lookup/stat/parent/destination lookup before calling the store. A future candidate should pass known source/destination inode data through a validated internal rename path and measure whether this improves `metaperf rename` without repeating the earlier VFS-only skip.
 - For writeback, focus on reducing cached-only partial-tail/single-block batch formation. The checksum A/B worsened stage ops and partial-tail counts, reinforcing that the core write gap is still batch formation and local staging, not checksum verification.
+
+### Round 10: create-open open-file-cache A/B
+
+Hypothesis:
+
+JuiceFS seeds its open-file metadata map on create-open. In JuiceFS v1.3.1, `pkg/vfs/vfs.go` `Create` calls metadata `Create`, and `pkg/meta/base.go` records the new inode/attr through the open-file cache. BrewFS FUSE `create` already has fresh attr at `open_with_cached_attr`, but that helper did not record an open-file-cache entry. The candidate tested whether recording that entry would reduce the next open/stat path and improve `metaperf open` or `create`.
+
+Candidate code:
+
+- `src/vfs/fs/mod.rs`: call `meta_record_open` inside `open_with_cached_attr` after allocating the file handle.
+- `src/vfs/fs/tests.rs`: add a focused test proving the next `open_fresh_ino` hits the open-file cache.
+
+TDD and local CI:
+
+```bash
+CARGO_TARGET_DIR=/data/slayer/brewfs-cargo-target CARGO_INCREMENTAL=0 \
+  cargo test -p brewfs --lib test_create_open_with_cached_attr_records_open_file_cache -- --nocapture
+
+CARGO_TARGET_DIR=/data/slayer/brewfs-cargo-target CARGO_INCREMENTAL=0 \
+  cargo test -p brewfs --lib open_file_cache -- --nocapture
+
+CARGO_TARGET_DIR=/data/slayer/brewfs-cargo-target CARGO_INCREMENTAL=0 \
+  cargo test -p brewfs --lib basic_tests -- --nocapture
+
+CARGO_TARGET_DIR=/data/slayer/brewfs-cargo-target CARGO_INCREMENTAL=0 \
+  cargo test -p brewfs --lib -- --nocapture
+```
+
+The focused test failed before the implementation and passed after it. The full lib test passed with 416 passed, 0 failed, 158 ignored before the full perf run. After the candidate was rejected and reverted, `cargo fmt --check`, `git diff --check`, and `cargo test -p brewfs --lib -- --nocapture` passed with 415 passed, 0 failed, 158 ignored.
+
+Full perf artifacts:
+
+- BrewFS kept baseline: `docker/compose-xfstests/artifacts/perf-run-1781737544-9539`
+- BrewFS candidate: `docker/compose-xfstests/artifacts/perf-run-1781745250-11404`
+- JuiceFS latest comparison: `docker/compose-xfstests/artifacts/juicefs-perf-run-1781746334-9398`
+
+BrewFS command:
+
+```bash
+TOOLS="fio-bigread fio-bigwrite fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw dirstress dirperf metaperf looptest"
+env PERF_FIO_DIRECT=0 PERF_FIO_IOENGINE=io_uring PERF_FIO_IODEPTH=1 \
+  PERF_FIO_PREFILL_DRAIN=true PERF_FIO_PREFILL_REMOUNT=true \
+  PERF_FIO_COLD_READ_CLEAR_CACHE=true PERF_FIO_DROP_CACHES=false \
+  PERF_FIO_COLD_READ=false PERF_FIO_COLD_READ_DROP_CACHES=false PERF_FIO_DIRECT_MATRIX= \
+  BREWFS_COMPRESSION=none BREWFS_FUSE_WORKERS=6 BREWFS_FUSE_MAX_BACKGROUND=512 \
+  BREWFS_READ_SSD_BYTES=4294967296 BREWFS_WRITE_SSD_BYTES=4294967296 \
+  BREWFS_VERIFY_CACHE_CHECKSUM=full \
+  BREWFS_METADATA_OPEN_CACHE_TTL_MS=1000 \
+  BREWFS_METADATA_OPEN_CACHE_CAPACITY=65536 \
+  CARGO_TARGET_DIR=/data/slayer/brewfs-cargo-target CARGO_INCREMENTAL=0 \
+  bash docker/compose-xfstests/run_redis_perf.sh \
+  --s3 --writeback-throughput-profile --tools "$TOOLS"
+```
+
+JuiceFS command:
+
+```bash
+TOOLS="fio-bigread fio-bigwrite fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw dirstress dirperf metaperf looptest"
+env PERF_FIO_DIRECT=0 PERF_FIO_IOENGINE=io_uring PERF_FIO_IODEPTH=1 \
+  PERF_FIO_PREFILL_DRAIN=true PERF_FIO_PREFILL_REMOUNT=true \
+  PERF_FIO_COLD_READ_CLEAR_CACHE=true PERF_FIO_DROP_CACHES=false \
+  PERF_FIO_COLD_READ=false PERF_FIO_COLD_READ_DROP_CACHES=false PERF_FIO_DIRECT_MATRIX= \
+  JFS_METADATA_OPEN_CACHE_TTL=1s JFS_METADATA_OPEN_CACHE_LIMIT=65536 \
+  bash docker/compose-xfstests/run_juicefs_perf.sh \
+  --writeback-throughput-profile --tools "$TOOLS"
+```
+
+FIO throughput:
+
+| Tool/op | BrewFS kept baseline | BrewFS candidate | JuiceFS latest | Candidate / kept |
+| --- | ---: | ---: | ---: | ---: |
+| `fio-bigread` | R 628.2 MiB/s | R 692.4 MiB/s | R 2398.1 MiB/s | 110.2% |
+| `fio-bigwrite` | W 1149.3 MiB/s | W 1197.7 MiB/s | W 3271.6 MiB/s | 104.2% |
+| `fio-seqread` | R 1754.0 MiB/s | R 1820.5 MiB/s | R 2508.7 MiB/s | 103.8% |
+| `fio-seqwrite` | W 69.2 MiB/s | W 69.1 MiB/s | W 255.9 MiB/s | 99.9% |
+| `fio-randread` | R 774.0 MiB/s | R 713.4 MiB/s | R 3310.8 MiB/s | 92.2% |
+| `fio-randwrite` | W 73.3 MiB/s | W 100.3 MiB/s | W 297.3 MiB/s | 136.8% |
+| `fio-randrw` | R 253.4 / W 113.8 MiB/s | R 213.4 / W 95.6 MiB/s | R 184.2 / W 83.4 MiB/s | R 84.2% / W 84.0% |
+
+Metadata:
+
+| Operation | BrewFS kept baseline | BrewFS candidate | JuiceFS latest | Candidate / kept |
+| --- | ---: | ---: | ---: | ---: |
+| create | 629.9 ops/s | 596.2 ops/s | 1365.5 ops/s | 94.6% |
+| open | 9271.0 ops/s | 9160.8 ops/s | 23568.2 ops/s | 98.8% |
+| stat | 1022440.1 ops/s | 1017805.2 ops/s | 1018695.1 ops/s | 99.5% |
+| readdir | 64070.5 ops/s | 63233.7 ops/s | 67605.3 ops/s | 98.7% |
+| rename | 1903.7 ops/s | 1902.6 ops/s | 2720.8 ops/s | 99.9% |
+
+Runner warning summary:
+
+| Artifact | WARNING | timeout | slow request | slow operation |
+| --- | ---: | ---: | ---: | ---: |
+| BrewFS kept baseline | 0 | 4 | 0 | 0 |
+| BrewFS candidate | 0 | 4 | 0 | 0 |
+| JuiceFS latest | 4008 | 3991 | 8 | 5 |
+
+Decision: rejected and reverted. The focused cache-hit test proved the mechanic, but the full perf run did not validate the performance hypothesis. The candidate regressed the target metadata operations (`create` -5.4%, `open` -1.2%) and also violated the mixed/random read regression budget. The unrelated-looking `randwrite` gain is not enough to keep a metadata-only change whose target did not improve.
+
+Updated next target:
+
+- Do not seed BrewFS open-file cache from `open_with_cached_attr` unless a future implementation can avoid the extra metadata/cache bookkeeping cost or batch it with create.
+- The next file-to-file metadata attempt should target duplicate metadata round trips at the store boundary instead of adding another VFS-level cache operation. Two promising routes are:
+  - return fresh attr directly from metadata create/mkdir/link style operations so FUSE/VFS does not need a follow-up stat;
+  - add a validated internal rename/create path that carries known parent/source/destination inode context through a single metadata transaction, while preserving all existing POSIX error semantics and cache invalidation.
+- Continue measuring all fio scenarios, including `randrw`, before accepting any metadata optimization. This round again showed that a targeted metadata hypothesis can move unrelated read/write scenarios through cache pressure and noise.
