@@ -557,10 +557,8 @@ stats_snapshot_tool() {
     {
         date -Iseconds
         echo
-        if [[ -e "$stats_path" ]]; then
-            tr -d '\000' <"$stats_path"
-        else
-            echo "missing $stats_path"
+        if ! brewfs_stats_dump; then
+            echo "missing_or_unavailable $stats_path timeout=${PERF_STATS_READ_TIMEOUT_SECS:-5s}"
         fi
     } >"$artifact_dir/diagnostics/stats-${tool}-${phase}.txt" 2>&1 || true
 }
@@ -575,10 +573,7 @@ stats_snapshot_after_tool() {
 
 brewfs_stat_value() {
     local metric="$1"
-    local stats_path="$mount_dir/.stats"
-    [[ -e "$stats_path" ]] || return 1
-
-    tr -d '\000' <"$stats_path" | awk -v metric="$metric" '
+    brewfs_stats_dump | awk -v metric="$metric" '
         $1 == metric {
             print $2
             found = 1
@@ -590,6 +585,12 @@ brewfs_stat_value() {
             }
         }
     '
+}
+
+brewfs_stats_dump() {
+    local stats_path="$mount_dir/.stats"
+    local timeout_value="${PERF_STATS_READ_TIMEOUT_SECS:-5s}"
+    timeout --foreground "$timeout_value" cat "$stats_path" | tr -d '\000'
 }
 
 numeric_stat_or_zero() {
