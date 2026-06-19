@@ -30,7 +30,7 @@ usage() {
   --local-fs                 改为使用本地目录作为对象存储
   --s3-writeback             启用 S3 commit-before-upload 写回语义（等价于 BREWFS_WRITEBACK_MODE=commit_before_upload）
   --writeback-throughput-profile
-                             启用 S3 writeback 全场景吞吐 profile（4GiB read/write memory+SSD cache, 12GiB memory budget, S3 max concurrency=16, writeback upload concurrency=4, pending soft/hard=1GiB/2GiB, writeback persist fsync=false, compression=none, full cache checksum, fuse workers=6, fuse max_background=512, fio prefill drain+remount）
+                             启用 S3 writeback 全场景吞吐 profile（4GiB read/write memory+SSD cache, 12GiB memory budget, S3 max concurrency=16, writer upload_concurrency=32, writeback upload concurrency=6, pending soft/hard=1GiB/2GiB, writeback persist fsync=false, compression=none, full cache checksum, fuse workers=6, fuse max_background=512, fio prefill drain+remount, write fio post-drain）
   --tools "<tool...>"        指定压力工具列表，默认: "fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw dirstress dirperf metaperf looptest"
   --brewfs-bench           额外运行一次宿主机 cargo bench --bench brewfs_bench
   --bench-args "<args...>"   透传给 cargo bench 之后的 Criterion 参数
@@ -38,15 +38,16 @@ usage() {
   -h, --help                 显示帮助
 
 支持的 PERF_TOOLS:
-  fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw fio dirstress dirperf metaperf looptest
+  fio-bigwrite fio-bigread fio-seqread fio-seqwrite fio-randread fio-randwrite fio-randrw fio dirstress dirperf metaperf looptest stress-ng
 
 可通过环境变量覆盖各工具参数:
   PERF_DIRSTRESS_ARGS PERF_DIRPERF_ARGS PERF_METAPERF_ARGS PERF_LOOPTEST_ARGS
+  PERF_STRESS_NG_ARGS 可完全覆盖默认 stress-ng 参数；如需 link/symlink stressor 请用该变量显式指定
   PERF_FIO_ARGS PERF_FIO_RUNTIME PERF_FIO_SIZE PERF_FIO_BS PERF_FIO_NUMJOBS PERF_FIO_DIRECT
   PERF_FIO_DIRECT_MATRIX="0 1" 可对 fio profile 显式跑 buffered/direct 矩阵（默认不启用）
   PERF_FIO_{SEQREAD,SEQWRITE,RANDREAD,RANDWRITE,RANDRW,BIGREAD,BIGWRITE}_{ARGS,BS,SIZE,NUMJOBS,IOENGINE,IODEPTH,DIRECT,DIRECT_MATRIX,RUNTIME}
   PERF_FIO_COLD_READ PERF_FIO_PREFILL_DRAIN PERF_FIO_PREFILL_REMOUNT PERF_FIO_PREFILL_DRAIN_TIMEOUT_SECS PERF_FIO_PREFILL_DRAIN_PENDING_BYTES
-  PERF_FIO_POST_WRITE_DRAIN PERF_FIO_POST_WRITE_DRAIN_TIMEOUT_SECS PERF_FIO_POST_WRITE_DRAIN_PENDING_BYTES
+  PERF_FIO_POST_WRITE_DRAIN PERF_FIO_POST_WRITE_DRAIN_TIMEOUT_SECS PERF_FIO_POST_WRITE_DRAIN_INTERVAL_SECS PERF_FIO_POST_WRITE_DRAIN_PENDING_BYTES
   PERF_FIO_COLD_READ_CLEAR_CACHE PERF_FIO_DROP_CACHES
   BREWFS_READ_MEMORY_BYTES BREWFS_READ_SSD_BYTES BREWFS_WRITE_MEMORY_BYTES BREWFS_WRITE_SSD_BYTES
   BREWFS_DIRTY_SLICE_TARGET_SIZE BREWFS_DIRTY_SLICE_MAX_AGE_MS BREWFS_UPLOAD_CONCURRENCY
@@ -58,6 +59,7 @@ usage() {
   BREWFS_VERIFY_CACHE_CHECKSUM
   BREWFS_UPLOAD_LIMIT_MIBPS BREWFS_DOWNLOAD_LIMIT_MIBPS
   BREWFS_METADATA_OPEN_CACHE_TTL_MS BREWFS_METADATA_OPEN_CACHE_CAPACITY
+  BREWFS_COMPACT_INTERVAL_SECS BREWFS_COMPACT_MIN_SLICE_COUNT BREWFS_COMPACT_ASYNC_THRESHOLD BREWFS_COMPACT_SYNC_THRESHOLD BREWFS_COMPACT_MAX_CHUNKS_PER_RUN
   BREWFS_WRITEBACK_MODE=commit_before_upload 可启用 S3 写回语义
   REDIS_PERF_DATA_MOUNT 可把 Redis AOF/RDB 数据挂到大容量目录或命名卷（例如 /data/slayer/brewfs-perf-redis）
   PERF_FIO_COLD_READ=true 可在读类 fio 预填充后等待写回 drain、清理 BrewFS 本地 cache root 并重挂载，再执行读测试
@@ -148,7 +150,7 @@ if [[ "$WRITEBACK_THROUGHPUT_PROFILE" == true ]]; then
     export BREWFS_WRITE_SSD_BYTES="${BREWFS_WRITE_SSD_BYTES:-4294967296}"
     export BREWFS_MEMORY_BUDGET_BYTES="${BREWFS_MEMORY_BUDGET_BYTES:-12884901888}"
     export BREWFS_S3_MAX_CONCURRENCY="${BREWFS_S3_MAX_CONCURRENCY:-16}"
-    export BREWFS_WRITEBACK_UPLOAD_CONCURRENCY="${BREWFS_WRITEBACK_UPLOAD_CONCURRENCY:-4}"
+    export BREWFS_WRITEBACK_UPLOAD_CONCURRENCY="${BREWFS_WRITEBACK_UPLOAD_CONCURRENCY:-6}"
     export BREWFS_UPLOAD_CONCURRENCY="${BREWFS_UPLOAD_CONCURRENCY:-32}"
     export BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES="${BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES:-1073741824}"
     export BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES="${BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES:-2147483648}"
@@ -162,6 +164,7 @@ if [[ "$WRITEBACK_THROUGHPUT_PROFILE" == true ]]; then
     export PERF_FIO_PREFILL_DRAIN="${PERF_FIO_PREFILL_DRAIN:-true}"
     export PERF_FIO_PREFILL_REMOUNT="${PERF_FIO_PREFILL_REMOUNT:-true}"
     export PERF_FIO_COLD_READ_CLEAR_CACHE="${PERF_FIO_COLD_READ_CLEAR_CACHE:-true}"
+    export PERF_FIO_POST_WRITE_DRAIN="${PERF_FIO_POST_WRITE_DRAIN:-true}"
 fi
 
 mkdir -p "$ARTIFACTS_DIR"
@@ -331,6 +334,19 @@ docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
     -e PERF_METAPERF_BG_FILES \
     -e PERF_LOOPTEST_ITERS \
     -e PERF_LOOPTEST_BUF_SIZE \
+    -e PERF_STRESS_NG_ARGS \
+    -e PERF_STRESS_NG_TIMEOUT \
+    -e PERF_STRESS_NG_DIR_WORKERS \
+    -e PERF_STRESS_NG_DIR_OPS \
+    -e PERF_STRESS_NG_DENTRY_WORKERS \
+    -e PERF_STRESS_NG_DENTRY_OPS \
+    -e PERF_STRESS_NG_RENAME_WORKERS \
+    -e PERF_STRESS_NG_RENAME_OPS \
+    -e PERF_STRESS_NG_UNLINK_WORKERS \
+    -e PERF_STRESS_NG_UNLINK_OPS \
+    -e PERF_STRESS_NG_HDD_WORKERS \
+    -e PERF_STRESS_NG_HDD_BYTES \
+    -e PERF_STRESS_NG_HDD_WRITE_SIZE \
     -e PERF_FIO_ARGS \
     -e PERF_FIO_SEQREAD_ARGS \
     -e PERF_FIO_SEQREAD_BS \
@@ -442,12 +458,31 @@ docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
     -e BREWFS_WRITEBACK_UPLOAD_CONCURRENCY \
     -e BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES \
     -e BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES \
+    -e BREWFS_CACHED_BLOCK_ASSEMBLER \
     -e BREWFS_WRITEBACK_PERSIST_SYNC \
     -e BREWFS_VERIFY_CACHE_CHECKSUM \
     -e BREWFS_UPLOAD_LIMIT_MIBPS \
     -e BREWFS_DOWNLOAD_LIMIT_MIBPS \
     -e BREWFS_METADATA_OPEN_CACHE_TTL_MS \
     -e BREWFS_METADATA_OPEN_CACHE_CAPACITY \
+    -e BREWFS_COMPACT_INTERVAL_SECS \
+    -e BREWFS_COMPACT_MIN_SLICE_COUNT \
+    -e BREWFS_COMPACT_MIN_FRAGMENT_RATIO \
+    -e BREWFS_COMPACT_ASYNC_THRESHOLD \
+    -e BREWFS_COMPACT_SYNC_THRESHOLD \
+    -e BREWFS_COMPACT_MAX_CHUNKS_PER_RUN \
+    -e BREWFS_COMPACT_MAX_CONCURRENT_TASKS \
+    -e BREWFS_COMPACT_LIGHT_ENABLED \
+    -e BREWFS_COMPACT_LIGHT_THRESHOLD \
+    -e BREWFS_COMPACT_HEAVY_ENABLED \
+    -e BREWFS_COMPACT_HEAVY_FRAGMENT_THRESHOLD \
+    -e BREWFS_COMPACT_HEAVY_SLICE_THRESHOLD \
+    -e BREWFS_COMPACT_HEAVY_FORCE_FRAGMENT_THRESHOLD \
+    -e BREWFS_COMPACT_LOCK_ASYNC_TTL_SECS \
+    -e BREWFS_COMPACT_LOCK_SYNC_TTL_SECS \
+    -e BREWFS_COMPACT_LOCK_TTL_PER_SLICE_MS \
+    -e BREWFS_COMPACT_LOCK_MIN_TTL_SECS \
+    -e BREWFS_COMPACT_LOCK_MAX_TTL_SECS \
     -e BREWFS_WRITEBACK_MODE \
     -e BREWFS_VFS_TIMING \
     -e PERF_LOG_TO_CONSOLE \

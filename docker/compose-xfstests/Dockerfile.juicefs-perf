@@ -11,7 +11,8 @@ RUN apt-get update && \
         ca-certificates \
         fuse3 \
         fio \
-        procps && \
+        procps \
+        stress-ng && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/juicefs /usr/local/bin/juicefs

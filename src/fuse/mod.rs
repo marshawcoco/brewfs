@@ -435,7 +435,8 @@ where
             .await?;
 
         let name_str = name.to_string_lossy();
-        let Some((_child_ino, vattr)) = self.child_attr_of(parent as i64, name_str.as_ref()).await
+        let Some((_child_ino, vattr)) =
+            self.child_attr_of(parent as i64, name_str.as_ref()).await?
         else {
             info!(parent, name = %name_str, "fuse.lookup ENOENT");
             return Err(libc::ENOENT.into());
@@ -2040,6 +2041,10 @@ where
         uid: u32,
         gid: u32,
     ) -> FuseResult<()> {
+        if uid == 0 {
+            return Ok(());
+        }
+
         if ino == self.root_ino() {
             return Ok(());
         }
@@ -2424,6 +2429,8 @@ impl From<MetaError> for Errno {
             MetaError::LockConflict { .. } => libc::EAGAIN,
             MetaError::NotSupported(_) | MetaError::NotImplemented => libc::ENOSYS,
             MetaError::InvalidPath(_) => libc::EINVAL,
+            MetaError::InvalidFilename => libc::EINVAL,
+            MetaError::FilenameTooLong => libc::ENAMETOOLONG,
             _ => libc::EIO,
         };
         Errno::from(code)

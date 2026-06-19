@@ -1534,7 +1534,160 @@ amplification.
       the nearby HEAD direct1 baseline.
 ```
 
-## 2026-06-18 Candidate P: Bucket Dirty Staging Paths
+## 2026-06-17 Rejected Candidate Q: FsWriteBackCache Stage-Range Map
+
+Hypothesis:
+
+- `FsWriteBackCache::seal_slice_record` proves staged completeness with
+  `metadata(slice_path).len() >= length`, which can mistake sparse staged files
+  for fully staged data.
+- Tracking staged ranges in memory would both close the correctness gap and
+  avoid an extra local filesystem metadata lookup on the foreground seal path.
+- This deliberately avoided the previously rejected upload concurrency,
+  notification, stage/upload ordering, and slice coalescing changes.
+
+Local CI gate:
+
+```text
+bash -n docker/compose-xfstests/run_perf_in_container.sh
+bash -n docker/compose-xfstests/run_redis_perf.sh
+bash -n docker/compose-xfstests/run_juicefs_perf_in_container.sh
+bash -n docker/compose-xfstests/run_juicefs_perf.sh
+bash docker/compose-xfstests/test_perf_report_delta.sh
+bash docker/compose-xfstests/test_juicefs_direct_matrix.sh
+bash docker/compose-xfstests/test_juicefs_perf_report.sh
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo check --workspace
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace
+rfuse3 feature checks skipped because rfuse3 is not a workspace member
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo check -p brewfs --no-default-features --features fuse-tokio-runtime
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo check -p brewfs --no-default-features --features fuse-io-uring-runtime
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo clippy --workspace
+```
+
+Functional result:
+
+- The focused RED test reproduced the sparse-stage hole: a tail-only staged file
+  could be sealed because file length was large enough.
+- The candidate made the focused writeback cache tests and the local CI Rust
+  job pass.
+
+Perf artifact:
+
+```text
+candidate direct0 focused writeback: perf-run-1781684542-6139
+accepted direct0 baseline:          perf-run-1781673470-37
+```
+
+Key results:
+
+```text
+fio-seqwrite tool_wall_s:  130 -> 126 (-3.1%)
+fio-randwrite tool_wall_s: 131 -> 132 (+0.8%)
+fio-randrw tool_wall_s:    143 -> 182 (+27.3%)
+fio-randrw read_bw_mib_s:  914.3 -> 275.9 (-69.8%)
+fio-randrw write_bw_mib_s: 409.4 -> 122.9 (-70.0%)
+
+randrw drain did not complete cleanly. After the script exceeded the expected
+post-write drain timeout, BrewFS still reported about 7.0 GiB dirty,
+6.1 GiB live dirty, 801 MiB recent pending upload, and 3.1 GiB remote upload
+in flight. A child shell was blocked in FUSE getattr on the mount.
+```
+
+Decision:
+
+- Reject and roll back Candidate Q code.
+- The correctness issue remains worth fixing, but this implementation creates
+  too many live cached-only slices in mixed read/write and turns `randrw` into a
+  hard regression.
+- Any future fix for staged coverage must be tied to the writer's existing
+  slice lifecycle state instead of adding a second hot-path range map in
+  `FsWriteBackCache`.
+- Keep the local CI test gate as mandatory for every accepted performance
+  change, but keep `randrw` plus post-write drain as the decisive perf gate.
+
+## 2026-06-17 Goal Amendment: Local CI Test Gate
+
+The active performance goal now treats the CI workflow's `Test workspace` step
+as a hard acceptance gate. Every accepted performance iteration must run this
+command locally, in the same iteration as the perf evidence, before the numbers
+are considered valid:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins
+```
+
+Focused tests still belong in the development loop, but they only prove the
+narrow hypothesis. They do not replace the local CI test gate. If this command
+fails, the next performance goal step is to fix, quarantine, or document that
+failure before continuing with throughput tuning.
+
+Local reproduction on 2026-06-17:
+
+```text
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --lib --bins
+result: ok, 504 passed, 0 failed, 159 ignored
+notable guard: vfs::fs::tests::io_tests::test_fs_fuzz_parallel_read_write passed
+```
+
+## 2026-06-17 Rejected Candidate R: Relax Older-Unique Append Reuse
+
+Hypothesis:
+
+- Older FUSE write `unique` values were causing `ChunkHandle::find_slice_or_create`
+  to reject writable slices even for strict appends.
+- A strict append is non-overlapping, so allowing it to reuse the current slice
+  might reduce `slice_reject_older_unique_ops`, slice creation, and object
+  amplification while preserving the existing overlap guard.
+
+Verification before perf:
+
+```text
+RED: cargo test -p brewfs --lib vfs::io::writer::tests::test_cached_older_unique_append_reuses_non_overlapping_slice -- --nocapture
+     failed as expected with slice_create_ops left=2 right=1
+GREEN: same focused test passed after the candidate change
+cargo test -p brewfs --lib vfs::io::writer::tests -- --nocapture
+     46 passed; 0 failed
+cargo fmt --all --check
+git diff --check
+```
+
+Perf artifact:
+
+```text
+candidate direct0 focused writeback: perf-run-1781687228-30572
+accepted direct0 baseline:          perf-run-1781673470-37
+```
+
+Key results:
+
+```text
+fio-seqwrite tool_wall_s:        130 -> 129 (-0.8%)
+fio-seqwrite write_bw_mib_s:     126.2 -> 124.8 (-1.0%)
+fio-seqwrite s3_put_ops:         9573 -> 10553 (+10.2%)
+fio-randwrite tool_wall_s:       131 -> 185 (+41.2%)
+fio-randwrite active_runtime_s:  43.719 -> 32.919 (-24.7%)
+fio-randwrite write_bw_mib_s:    204.6 -> 285.9 (+39.8%)
+fio-randwrite buffer_dirty_mib:  0 -> 2964.7
+fio-randwrite live_dirty_mib:    0 -> 1988.9
+slice_reject_older_unique_ops:   149288 -> 143544 (-3.8%)
+upload_partial_tail_flush_ops:   574 -> 4497 (+683.4%)
+```
+
+Decision:
+
+- Reject and roll back Candidate R code.
+- The candidate made active `fio-randwrite` bandwidth look better, but it
+  shifted too much cost into dirty writeback debt and made wall time 41.2%
+  worse.
+- The small drop in older-unique rejects did not reduce slice/object
+  amplification. It increased slice creation, upload batch count, partial-tail
+  pressure, and pending dirty bytes.
+- `creation_unique` is not the root performance lever by itself. Future work
+  should use explicit extent ordering/coalescing or upload scheduling evidence
+  instead of relaxing append reuse heuristics in isolation.
+
+## 2026-06-18 Candidate S: Bucket Dirty Staging Paths
 
 Hypothesis:
 
@@ -1615,7 +1768,7 @@ Randrw repeat guard:
 
 Decision:
 
-- Accept Candidate P as a performance improvement.
+- Accept Candidate S as a performance improvement.
 - The first targeted `fio-randrw` row was noisy and had higher GET latency and
   lower cache hit rate; a clean randrw repeat was above both the clean BrewFS
   baseline and the current JuiceFS reference. The accepted signal is therefore
@@ -1628,7 +1781,7 @@ Decision:
 Next target:
 
 ```text
-Candidate Q: reduce remaining 4 KiB create/write amplification at the writer
+Candidate T: reduce remaining 4 KiB create/write amplification at the writer
 layer, not only at the local staging namespace.
   Use the latest gate as the new BrewFS target:
     - keep metaperf create >= 650 ops/s;
