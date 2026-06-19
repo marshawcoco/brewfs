@@ -4575,6 +4575,16 @@ mod tests {
         test_config_with_writeback(layout, WriteBackMode::UploadBeforeCommit)
     }
 
+    fn test_config_without_auto_flush(layout: ChunkLayout) -> Arc<WriteConfig> {
+        // Keep live-slice assertions deterministic instead of racing auto_flush.
+        Arc::new(
+            WriteConfig::new(layout)
+                .page_size(4 * 1024)
+                .freeze_min_bytes(4096)
+                .auto_flush_max_age(Duration::from_secs(60)),
+        )
+    }
+
     #[test]
     fn test_writeback_backpressure_decision_uses_soft_sleep_before_hard_wait() {
         let soft = 12 * 1024;
@@ -5904,7 +5914,12 @@ mod tests {
             Arc::new(ReadConfig::new(layout)),
             backend.clone(),
         ));
-        let writer = Arc::new(DataWriter::new(test_config(layout), backend, reader, None));
+        let writer = Arc::new(DataWriter::new(
+            test_config_without_auto_flush(layout),
+            backend,
+            reader,
+            None,
+        ));
         let file_writer = writer.ensure_file(inode);
 
         file_writer.write_at(0, &[1u8; 1024]).await.unwrap();
@@ -5938,7 +5953,12 @@ mod tests {
             Arc::new(ReadConfig::new(layout)),
             backend.clone(),
         ));
-        let writer = Arc::new(DataWriter::new(test_config(layout), backend, reader, None));
+        let writer = Arc::new(DataWriter::new(
+            test_config_without_auto_flush(layout),
+            backend,
+            reader,
+            None,
+        ));
 
         let normal_ino = meta
             .create_file(1, "origin_normal.txt".to_string())
