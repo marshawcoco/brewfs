@@ -31,6 +31,24 @@ const DEFAULT_TOTAL_AHEAD_LIMIT: u64 = 256 * 1024 * 1024;
 const READ_SESSIONS: usize = 2;
 const MAX_SLICE_READ_RETRIES: u32 = 5;
 
+/// Send-able wrapper for one non-overlapping read output span.
+///
+/// SAFETY: Callers must build these from disjoint ranges of a stable backing
+/// buffer, then await all futures before the backing buffer is moved or dropped.
+struct ReadSpanBuf {
+    ptr: *mut u8,
+    len: usize,
+}
+
+unsafe impl Send for ReadSpanBuf {}
+
+impl ReadSpanBuf {
+    /// SAFETY: the pointer must still be valid and uniquely owned by this span.
+    unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
 fn is_transient_read_error(e: &anyhow::Error) -> bool {
     let msg = format!("{e:?}").to_lowercase();
     msg.contains("timeout")
@@ -792,46 +810,37 @@ where
         // handles asynchronous readahead after each successful read.
         let _ahead = self.check_session(offset, actual_len);
 
-        let mut chunks: Vec<Option<bytes::Bytes>> = vec![None; spans.len()];
+        let mut data = vec![0; actual_len];
         let result = async {
             let mut reads = FuturesUnordered::new();
-            for (idx, span) in spans.into_iter().enumerate() {
+            let mut cursor = 0;
+            for span in spans {
                 let span_len = span.len.as_usize();
+                let mut out = ReadSpanBuf {
+                    ptr: data[cursor..cursor + span_len].as_mut_ptr(),
+                    len: span_len,
+                };
+                cursor += span_len;
+
                 reads.push(async move {
-                    let data = self
-                        .read_chunk_span(span.index, span.offset, span_len)
-                        .await?;
-                    Ok::<_, anyhow::Error>((idx, data))
+                    // SAFETY: every ReadSpanBuf points at a disjoint range of
+                    // `data`, and all futures are awaited before `data` is used.
+                    let out = unsafe { out.as_mut_slice() };
+                    self.read_chunk_span_into(span.index, span.offset, out)
+                        .await
                 });
             }
 
             while let Some(res) = reads.next().await {
-                let (idx, data) = res?;
-                chunks[idx] = Some(data);
+                res?;
             }
 
-            Ok::<_, anyhow::Error>(actual_len)
+            Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::trace_span!("read_at.read_spans"))
         .await;
 
         drop(pin_guard);
-
-        // Assemble Bytes chunks into output
-        let data = if result.is_ok() {
-            let total: usize = chunks
-                .iter()
-                .filter_map(|chunk| chunk.as_ref())
-                .map(|chunk| chunk.len())
-                .sum();
-            let mut out = Vec::with_capacity(total);
-            for chunk in chunks.iter().filter_map(|chunk| chunk.as_ref()) {
-                out.extend_from_slice(chunk);
-            }
-            out
-        } else {
-            Vec::new()
-        };
 
         if should_clean {
             self.cleanup_invalid()
@@ -844,15 +853,12 @@ where
     // Read one chunk span directly into the caller buffer through DataFetcher →
     // BlockStore, using the per-handle chunk→slice metadata cache to skip
     // repeated meta queries within the same chunk.
-    /// Serve the chunk span directly from the block cache when possible,
-    /// returning the cached Bytes (zero-copy Arc bump).  Falls back to
-    /// DataFetcher for cache misses.
-    async fn read_chunk_span(
+    async fn read_chunk_span_into(
         &self,
         index: u64,
         offset: u64,
-        len: usize,
-    ) -> anyhow::Result<bytes::Bytes> {
+        out: &mut [u8],
+    ) -> anyhow::Result<()> {
         let chunk_id = chunk_id_for(self.inode.ino(), index)?;
 
         for attempt in 0..MAX_SLICE_READ_RETRIES {
@@ -870,21 +876,23 @@ where
                     }
                 };
 
-                let mut fetcher = DataFetcher::with_slices(
+                DataFetcher::read_at_into_from_slices(
                     self.config.layout,
                     chunk_id,
                     &self.backend,
-                    (*slices_arc).clone(),
-                );
-                fetcher.read_at(offset.into(), len).await
+                    slices_arc.as_slice(),
+                    offset.into(),
+                    out,
+                )
+                .await
             }
             .await;
 
             match result {
-                Ok(data) => {
-                    self.complete_demand_slices(index, offset, len, None::<&anyhow::Error>)
+                Ok(()) => {
+                    self.complete_demand_slices(index, offset, out.len(), None::<&anyhow::Error>)
                         .await;
-                    return Ok(bytes::Bytes::from(data));
+                    return Ok(());
                 }
                 Err(err)
                     if attempt + 1 < MAX_SLICE_READ_RETRIES && is_transient_read_error(&err) =>
@@ -898,7 +906,7 @@ where
                     tokio::time::sleep(retry_delay(attempt)).await;
                 }
                 Err(err) => {
-                    self.complete_demand_slices(index, offset, len, Some(&err))
+                    self.complete_demand_slices(index, offset, out.len(), Some(&err))
                         .await;
                     return Err(err);
                 }
