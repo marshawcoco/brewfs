@@ -17,6 +17,7 @@
 #   KEEP_PERF_DATA=1             # Preserve perf.data; default removes it after flame/report generation.
 #   PERF_WORK_BASE=/mnt/perf     # Base directory for mount/cache staging.
 #   PERF_WARMUP_DRAIN=false      # Skip post-warmup writeback drain before measured fio.
+#   PERF_POST_FIO_DRAIN=false    # Skip writeback drain between write-heavy fio workloads.
 #
 # For detailed libc frames, install matching system debuginfo first:
 #   Ubuntu/Debian: apt-get install libc6-dbg
@@ -85,6 +86,7 @@ PERF_WARMUP_DRAIN="${PERF_WARMUP_DRAIN:-true}"
 PERF_WARMUP_DRAIN_TIMEOUT_SECS="${PERF_WARMUP_DRAIN_TIMEOUT_SECS:-180}"
 PERF_WARMUP_DRAIN_INTERVAL_SECS="${PERF_WARMUP_DRAIN_INTERVAL_SECS:-2}"
 PERF_WARMUP_DRAIN_PENDING_BYTES="${PERF_WARMUP_DRAIN_PENDING_BYTES:-0}"
+PERF_POST_FIO_DRAIN="${PERF_POST_FIO_DRAIN:-true}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -390,6 +392,13 @@ for j in d.get('jobs',[]):
     stats_snapshot "fio-${label}-after"
     mv "$tmp_json" "$FIO_DIR/fio-${label}.json" 2>/dev/null || true
     mv "$tmp_err" "$FIO_DIR/fio-${label}.err" 2>/dev/null || true
+    if truthy "$PERF_POST_FIO_DRAIN"; then
+        case "$label" in
+            seqwrite|randwrite|randrw)
+                wait_for_writeback_drain "fio-$label" "$PERF_WARMUP_DRAIN_TIMEOUT_SECS" "$PERF_WARMUP_DRAIN_INTERVAL_SECS" "$PERF_WARMUP_DRAIN_PENDING_BYTES" || true
+                ;;
+        esac
+    fi
 }
 
 run_fio_suite() {

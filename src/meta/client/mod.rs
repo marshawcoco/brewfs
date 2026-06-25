@@ -3485,16 +3485,38 @@ mod tests {
             crate::control::runtime::RuntimeRegistry::new(runtime_dir.path().to_path_buf());
         let record = registry.select_instance(Some("/mnt/list")).await.unwrap();
 
+        let acl_entries = vec![
+            crate::control::protocol::ControlAclEntry {
+                scope: "access".to_string(),
+                tag: "user_obj".to_string(),
+                id: None,
+                perm: "rw-".to_string(),
+            },
+            crate::control::protocol::ControlAclEntry {
+                scope: "access".to_string(),
+                tag: "group_obj".to_string(),
+                id: None,
+                perm: "r--".to_string(),
+            },
+            crate::control::protocol::ControlAclEntry {
+                scope: "access".to_string(),
+                tag: "other".to_string(),
+                id: None,
+                perm: "---".to_string(),
+            },
+            crate::control::protocol::ControlAclEntry {
+                scope: "access".to_string(),
+                tag: "user".to_string(),
+                id: Some(1001),
+                perm: "rw-".to_string(),
+            },
+        ];
+
         let acl = crate::control::client::send_request(
             &record.socket_path,
             &crate::control::protocol::ControlRequest::PutAcl {
                 path: "/docs/readme.md".to_string(),
-                entries: vec![crate::control::protocol::ControlAclEntry {
-                    scope: "access".to_string(),
-                    tag: "user".to_string(),
-                    id: Some(1001),
-                    perm: "rw-".to_string(),
-                }],
+                entries: acl_entries.clone(),
             },
         )
         .await
@@ -3502,7 +3524,7 @@ mod tests {
         match acl {
             crate::control::protocol::ControlResponse::Acl { path, entries } => {
                 assert_eq!(path, "/docs/readme.md");
-                assert_eq!(entries.len(), 1);
+                assert_eq!(entries, acl_entries);
             }
             other => panic!("unexpected acl response: {other:?}"),
         }
@@ -3649,6 +3671,18 @@ mod tests {
                 tag: "user_obj".to_string(),
                 id: None,
                 perm: "rwx".to_string(),
+            },
+            crate::control::protocol::ControlAclEntry {
+                scope: "access".to_string(),
+                tag: "group_obj".to_string(),
+                id: None,
+                perm: "r-x".to_string(),
+            },
+            crate::control::protocol::ControlAclEntry {
+                scope: "access".to_string(),
+                tag: "other".to_string(),
+                id: None,
+                perm: "r-x".to_string(),
             },
             crate::control::protocol::ControlAclEntry {
                 scope: "default".to_string(),
