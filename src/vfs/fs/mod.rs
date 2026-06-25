@@ -1723,6 +1723,47 @@ where
         let new_parent_attr = self
             .meta_stat_required(new_parent_ino, PathHint::none())
             .await?;
+
+        self.rename_at_with_known_attrs(
+            old_parent_ino,
+            old_name,
+            new_parent_ino,
+            new_name.to_string(),
+            src_ino,
+            &src_attr,
+            &new_parent_attr,
+            None,
+        )
+        .await
+    }
+
+    /// Rename after the caller has already resolved the source inode and
+    /// destination parent attributes. This avoids duplicate lookup/stat work in
+    /// the FUSE rename path while keeping VFS-level circular-directory checks.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, src_attr, new_parent_attr),
+        fields(old_parent_ino, old_name, new_parent_ino, new_name, src_ino)
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn rename_at_with_known_attrs(
+        &self,
+        old_parent_ino: i64,
+        old_name: &str,
+        new_parent_ino: i64,
+        new_name: String,
+        src_ino: i64,
+        src_attr: &FileAttr,
+        new_parent_attr: &FileAttr,
+        known_dest_ino: Option<Option<i64>>,
+    ) -> Result<(), VfsError> {
+        Self::validate_entry_name(old_name)?;
+        Self::validate_entry_name(&new_name)?;
+
+        if old_parent_ino == new_parent_ino && old_name == new_name {
+            return Ok(());
+        }
+
         if new_parent_attr.kind != FileType::Dir {
             return Err(VfsError::NotADirectory {
                 path: PathHint::none(),
@@ -1739,11 +1780,21 @@ where
             });
         }
 
-        self.meta_rename(
+        let (dest_ino, destination_checked) = match known_dest_ino {
+            Some(dest_ino) => (dest_ino, true),
+            None => (None, false),
+        };
+
+        self.meta_rename_with_known_attrs(
             old_parent_ino,
             old_name,
             new_parent_ino,
-            new_name.to_string(),
+            new_name,
+            src_ino,
+            src_attr.clone(),
+            new_parent_attr.clone(),
+            dest_ino,
+            destination_checked,
         )
         .await?;
 
