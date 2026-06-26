@@ -2544,7 +2544,10 @@ where
                 &self.state.stats.vfs_read_handle_ops,
                 &self.state.stats.vfs_read_handle_lat_us,
             );
-            handle.read(offset, len).await.map_err(VfsError::from)?
+            handle
+                .read(offset, actual_len)
+                .await
+                .map_err(VfsError::from)?
         };
         {
             let _overlay_timer = self.vfs_timing_timer(

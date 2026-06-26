@@ -396,6 +396,7 @@ impl<B: ObjectBackend + 'static> ObjectBlockStore<B> {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn new_async(client: ObjectClient<B>) -> anyhow::Result<Self> {
         Self::new_with_configs_async(
             client,
@@ -671,7 +672,7 @@ impl<B: ObjectBackend + Send + Sync + 'static> ObjectBlockStore<B> {
         };
 
         if self.config.populate_write_cache_after_upload
-            && cache_block.len() <= self.config.range_size_threshold()
+            && cache_block.len() <= self.config.block_size
         {
             let cache_started = Instant::now();
             self.populate_write_cache_after_upload(key_str, cache_block)
@@ -1509,8 +1510,8 @@ mod tests {
             .await?;
         assert_eq!(
             default_store.block_cache.stats().write_hot_entries,
-            1,
-            "large write blocks should bypass the upload-time recent-write hot tier"
+            2,
+            "full-block-sized writes should populate the upload-time recent-write hot tier"
         );
         let mut large_out = vec![0u8; large_data.len()];
         default_store
