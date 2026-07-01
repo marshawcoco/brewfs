@@ -67,7 +67,7 @@ fn fuse_read_direct_io_enabled() -> bool {
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
         ),
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
@@ -3948,18 +3948,21 @@ mod fuse_init_tests {
     }
 
     #[test]
-    fn open_reply_flags_keep_cache_for_read_only_handles_by_default() {
+    fn open_reply_flags_use_direct_io_for_read_only_handles_by_default() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
         }
 
-        assert_eq!(fuse_open_reply_flags(true, false), FOPEN_KEEP_CACHE);
+        assert_eq!(
+            fuse_open_reply_flags(true, false),
+            FOPEN_KEEP_CACHE | FOPEN_DIRECT_IO
+        );
         assert_eq!(fuse_open_reply_flags(true, true), FOPEN_KEEP_CACHE);
     }
 
     #[test]
-    fn open_reply_flags_enable_direct_io_for_read_only_handles_explicitly() {
+    fn open_reply_flags_keep_direct_io_for_read_only_handles_explicitly() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var("BREWFS_FUSE_READ_DIRECT_IO", "1");
