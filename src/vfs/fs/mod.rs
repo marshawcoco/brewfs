@@ -1852,15 +1852,8 @@ where
         new_parent_attr: &FileAttr,
         known_dest_ino: Option<Option<i64>>,
     ) -> Result<(), VfsError> {
-        if old_name.is_empty()
-            || new_name.is_empty()
-            || old_name.contains('/')
-            || old_name.contains('\0')
-            || new_name.contains('/')
-            || new_name.contains('\0')
-        {
-            return Err(VfsError::InvalidFilename);
-        }
+        Self::validate_entry_name(old_name)?;
+        Self::validate_entry_name(&new_name)?;
 
         if old_parent_ino == new_parent_ino && old_name == new_name {
             return Ok(());
