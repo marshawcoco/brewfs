@@ -64,8 +64,10 @@ pub trait WriteBackCache: Send + Sync {
 /// Filesystem-backed write-back cache implementation.
 ///
 /// Directory layout:
-///   {root}/dirty/{local_seq/1024}/{ino}_{chunk_id}_{local_seq}_{epoch}.slice  — raw data
-///   {root}/dirty/{local_seq/1024}/{ino}_{chunk_id}_{local_seq}_{epoch}.meta   — JSON metadata
+///   {root}/dirty/{local_seq/1024}/{ino}_{chunk_id}_{local_seq}_{epoch}.slice  — open raw data
+///   {root}/dirty/{local_seq/1024}/{ino}_{chunk_id}_{local_seq}_{epoch}.meta   — legacy JSON metadata
+///   {root}/dirty/{local_seq/1024}/{ino}_{chunk_id}_{local_seq}_{epoch}_{off}_{len}.sealed
+///     — sealed data and record for high-throughput unsynced writeback
 pub struct FsWriteBackCache {
     root: PathBuf,
     seq: AtomicU64,
@@ -133,6 +135,27 @@ impl FsWriteBackCache {
         path.extension().and_then(|e| e.to_str()) == Some("meta")
     }
 
+    fn is_sealed_path(path: &Path) -> bool {
+        path.extension().and_then(|e| e.to_str()) == Some("sealed")
+    }
+
+    fn sealed_record_from_path(path: PathBuf) -> Option<DirtySliceRecord> {
+        let file_name = path.file_name()?.to_str()?;
+        let (key, chunk_offset, length) = DirtySliceKey::parse_sealed_file_name(file_name)?;
+        Some(DirtySliceRecord {
+            key,
+            ino: key.ino,
+            chunk_id: key.chunk_id,
+            chunk_offset,
+            length,
+            remote_slice_id: None,
+            state: DirtySliceState::Sealed,
+            path,
+            retry_count: 0,
+            last_error: None,
+        })
+    }
+
     async fn push_recoverable_meta(
         &self,
         path: &Path,
@@ -155,7 +178,16 @@ impl FsWriteBackCache {
         Ok(())
     }
 
-    async fn collect_recoverable_meta_in_dir(
+    fn push_recoverable_sealed(path: PathBuf, records: &mut Vec<DirtySliceRecord>) {
+        match Self::sealed_record_from_path(path.clone()) {
+            Some(record) => records.push(record),
+            None => {
+                tracing::warn!(path = ?path, "invalid sealed writeback record name");
+            }
+        }
+    }
+
+    async fn collect_recoverable_records_in_dir(
         &self,
         dir: &Path,
         records: &mut Vec<DirtySliceRecord>,
@@ -163,8 +195,59 @@ impl FsWriteBackCache {
         let mut entries = fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if entry.file_type().await?.is_file() && Self::is_meta_path(&path) {
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+            if Self::is_meta_path(&path) {
                 self.push_recoverable_meta(&path, records).await?;
+            } else if Self::is_sealed_path(&path) {
+                Self::push_recoverable_sealed(path, records);
+            }
+        }
+        Ok(())
+    }
+
+    async fn sealed_path_for_key(&self, key: &DirtySliceKey) -> anyhow::Result<Option<PathBuf>> {
+        let dir = key.dir_path(&self.root);
+        if !dir.exists() {
+            return Ok(None);
+        }
+
+        let prefix = key.sealed_file_prefix();
+        let mut entries = fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !entry.file_type().await?.is_file() || !Self::is_sealed_path(&path) {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with(&prefix) {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn remove_sealed_paths(&self, key: &DirtySliceKey) -> anyhow::Result<()> {
+        let dir = key.dir_path(&self.root);
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let prefix = key.sealed_file_prefix();
+        let mut entries = fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !entry.file_type().await?.is_file() || !Self::is_sealed_path(&path) {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with(&prefix) {
+                let _ = fs::remove_file(path).await;
             }
         }
         Ok(())
@@ -181,13 +264,22 @@ impl FsWriteBackCache {
         let mut entries = fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if !entry.file_type().await?.is_file() || !Self::is_meta_path(&path) {
+            if !entry.file_type().await?.is_file() {
                 continue;
             }
 
-            let record = match self.read_meta(&path).await {
-                Ok(record) if record.ino == ino && record.chunk_id == chunk_id => record,
-                Ok(_) | Err(_) => continue,
+            let record = if Self::is_meta_path(&path) {
+                match self.read_meta(&path).await {
+                    Ok(record) if record.ino == ino && record.chunk_id == chunk_id => record,
+                    Ok(_) | Err(_) => continue,
+                }
+            } else if Self::is_sealed_path(&path) {
+                match Self::sealed_record_from_path(path) {
+                    Some(record) if record.ino == ino && record.chunk_id == chunk_id => record,
+                    Some(_) | None => continue,
+                }
+            } else {
+                continue;
             };
 
             if !record.path.exists() {
@@ -214,6 +306,40 @@ impl FsWriteBackCache {
             file.read_exact(&mut buf[dst_start..dst_start + read_len])
                 .await?;
         }
+        Ok(())
+    }
+
+    async fn write_json_record(
+        &self,
+        key: DirtySliceKey,
+        chunk_offset: u64,
+        length: u64,
+        path: PathBuf,
+    ) -> anyhow::Result<()> {
+        let record = DirtySliceRecord {
+            key,
+            ino: key.ino,
+            chunk_id: key.chunk_id,
+            chunk_offset,
+            length,
+            remote_slice_id: None,
+            state: DirtySliceState::Sealed,
+            path,
+            retry_count: 0,
+            last_error: None,
+        };
+        self.write_meta(&key, &record).await
+    }
+
+    async fn seal_by_rename(
+        &self,
+        key: DirtySliceKey,
+        chunk_offset: u64,
+        length: u64,
+        slice_path: PathBuf,
+    ) -> anyhow::Result<()> {
+        let sealed_path = key.sealed_slice_path(&self.root, chunk_offset, length);
+        fs::rename(&slice_path, &sealed_path).await?;
         Ok(())
     }
 
@@ -277,19 +403,13 @@ impl WriteBackCache for FsWriteBackCache {
             length
         );
 
-        let record = DirtySliceRecord {
-            key,
-            ino: key.ino,
-            chunk_id: key.chunk_id,
-            chunk_offset,
-            length,
-            remote_slice_id: None,
-            state: DirtySliceState::Sealed,
-            path: slice_path,
-            retry_count: 0,
-            last_error: None,
-        };
-        self.write_meta(&key, &record).await?;
+        if self.sync_on_persist {
+            self.write_json_record(key, chunk_offset, length, slice_path)
+                .await?;
+        } else {
+            self.seal_by_rename(key, chunk_offset, length, slice_path)
+                .await?;
+        }
         Ok(())
     }
 
@@ -297,18 +417,34 @@ impl WriteBackCache for FsWriteBackCache {
         &self,
         key: &DirtySliceKey,
     ) -> anyhow::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
-        let path = key.slice_path(&self.root);
+        let path = if key.slice_path(&self.root).exists() {
+            key.slice_path(&self.root)
+        } else {
+            self.sealed_path_for_key(key)
+                .await?
+                .unwrap_or_else(|| key.slice_path(&self.root))
+        };
         let file = fs::File::open(&path).await?;
         Ok(Box::new(file))
     }
 
     async fn mark_state(&self, key: &DirtySliceKey, state: DirtySliceState) -> anyhow::Result<()> {
+        let mut updated_meta = false;
         for meta_path in [key.meta_path(&self.root), key.legacy_meta_path(&self.root)] {
             if meta_path.exists() {
                 let mut record = self.read_meta(&meta_path).await?;
                 record.state = state;
                 self.write_meta_at(meta_path, &record).await?;
+                updated_meta = true;
             }
+        }
+        if !updated_meta
+            && matches!(
+                state,
+                DirtySliceState::Committed | DirtySliceState::Obsolete
+            )
+        {
+            self.remove_sealed_paths(key).await?;
         }
         Ok(())
     }
@@ -324,8 +460,12 @@ impl WriteBackCache for FsWriteBackCache {
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let file_type = entry.file_type().await?;
-            if file_type.is_file() && Self::is_meta_path(&path) {
-                self.push_recoverable_meta(&path, &mut records).await?;
+            if file_type.is_file() {
+                if Self::is_meta_path(&path) {
+                    self.push_recoverable_meta(&path, &mut records).await?;
+                } else if Self::is_sealed_path(&path) {
+                    Self::push_recoverable_sealed(path, &mut records);
+                }
                 continue;
             }
 
@@ -333,15 +473,15 @@ impl WriteBackCache for FsWriteBackCache {
                 continue;
             }
 
-            // New bucketed layout: dirty/<bucket>/*.meta.
-            self.collect_recoverable_meta_in_dir(&path, &mut records)
+            // New bucketed layout: dirty/<bucket>/*.meta or *.sealed.
+            self.collect_recoverable_records_in_dir(&path, &mut records)
                 .await?;
 
             // Legacy layout: dirty/<ino>/<chunk>/*.meta.
             let mut nested = fs::read_dir(&path).await?;
             while let Some(nested_entry) = nested.next_entry().await? {
                 if nested_entry.file_type().await?.is_dir() {
-                    self.collect_recoverable_meta_in_dir(&nested_entry.path(), &mut records)
+                    self.collect_recoverable_records_in_dir(&nested_entry.path(), &mut records)
                         .await?;
                 }
             }
@@ -358,6 +498,7 @@ impl WriteBackCache for FsWriteBackCache {
         ] {
             let _ = fs::remove_file(&path).await;
         }
+        self.remove_sealed_paths(key).await?;
         Ok(())
     }
 }
@@ -407,7 +548,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn unsynced_persist_still_writes_slice_and_record() {
+    async fn unsynced_persist_writes_compact_sealed_record() {
         let temp = tempfile::tempdir().unwrap();
         let cache = FsWriteBackCache::new_with_sync(temp.path().to_path_buf(), false);
         let key = DirtySliceKey {
@@ -423,11 +564,43 @@ mod tests {
             .unwrap();
         cache.seal_slice_record(key, 0, 5).await.unwrap();
 
-        assert_eq!(tokio::fs::read(path).await.unwrap(), b"small");
+        assert!(
+            !path.exists(),
+            "unsynced seal should rename the open slice into a compact record"
+        );
+        assert!(
+            !key.meta_path(temp.path()).exists(),
+            "unsynced seal should not write a JSON sidecar on the hot path"
+        );
         let records = cache.recover().await.unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].key, key);
         assert_eq!(records[0].state, DirtySliceState::Sealed);
+        assert_eq!(tokio::fs::read(&records[0].path).await.unwrap(), b"small");
+    }
+
+    #[tokio::test]
+    async fn synced_persist_keeps_legacy_json_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = FsWriteBackCache::new_with_sync(temp.path().to_path_buf(), true);
+        let key = DirtySliceKey {
+            ino: 7,
+            chunk_id: 11,
+            local_seq: 13,
+            epoch: 0,
+        };
+
+        let path = cache
+            .persist_slice_data(key, vec![Bytes::from_static(b"small")], 0)
+            .await
+            .unwrap();
+        cache.seal_slice_record(key, 0, 5).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"small");
+        assert!(key.meta_path(temp.path()).exists());
+        let records = cache.recover().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, path);
     }
 
     #[tokio::test]
@@ -460,6 +633,7 @@ mod tests {
         assert_eq!(records[0].chunk_offset, 4096);
         assert_eq!(records[0].length, 7);
         assert_eq!(records[0].state, DirtySliceState::Sealed);
+        assert_eq!(tokio::fs::read(&records[0].path).await.unwrap(), b"payload");
     }
 
     #[tokio::test]
@@ -477,16 +651,19 @@ mod tests {
             .persist_slice_data(key, vec![Bytes::from_static(b"first")], 0)
             .await
             .unwrap();
-        let path = cache
+        cache
             .persist_slice_data(key, vec![Bytes::from_static(b"second")], 5)
             .await
             .unwrap();
         cache.seal_slice_record(key, 0, 11).await.unwrap();
 
-        assert_eq!(tokio::fs::read(path).await.unwrap(), b"firstsecond");
         let records = cache.recover().await.unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].length, 11);
+        assert_eq!(
+            tokio::fs::read(&records[0].path).await.unwrap(),
+            b"firstsecond"
+        );
     }
 
     #[tokio::test]
@@ -510,6 +687,10 @@ mod tests {
         assert!(
             !key.legacy_slice_path(temp.path()).exists(),
             "new writes should use the bucketed dirty path"
+        );
+        assert!(
+            !path.exists(),
+            "sealed unsynced records should move out of the open slice path"
         );
 
         let mut buf = vec![0u8; 16];

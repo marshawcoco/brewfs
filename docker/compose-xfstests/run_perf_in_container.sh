@@ -304,6 +304,7 @@ EOF
             || -n "${BREWFS_COMPRESSION:-}" \
             || -n "${BREWFS_VERIFY_CACHE_CHECKSUM:-}" \
             || -n "${BREWFS_WRITEBACK_PERSIST_SYNC:-}" \
+            || -n "${BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT:-}" \
             || -n "${BREWFS_PERSIST_WRITE_CACHE_AFTER_UPLOAD:-}" \
             || -n "${BREWFS_UPLOAD_LIMIT_MIBPS:-}" \
             || -n "${BREWFS_DOWNLOAD_LIMIT_MIBPS:-}" \
@@ -329,6 +330,7 @@ EOF
             echo "  compression: ${comp}"
             [[ -n "${BREWFS_VERIFY_CACHE_CHECKSUM:-}" ]] && echo "  verify_cache_checksum: ${BREWFS_VERIFY_CACHE_CHECKSUM}"
             [[ -n "${BREWFS_WRITEBACK_PERSIST_SYNC:-}" ]] && echo "  writeback_persist_sync: ${BREWFS_WRITEBACK_PERSIST_SYNC}"
+            [[ -n "${BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT:-}" ]] && echo "  writeback_require_stage_before_commit: ${BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT}"
             [[ -n "${BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES:-}" ]] && echo "  writeback_recent_pending_soft_bytes: ${BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES}"
             [[ -n "${BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES:-}" ]] && echo "  writeback_recent_pending_hard_bytes: ${BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES}"
             if [[ -n "$writeback_mode" ]]; then

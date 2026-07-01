@@ -381,6 +381,7 @@ pub struct CacheFileConfig {
     pub verify_cache_checksum: Option<String>,
     pub writeback_mode: Option<String>,
     pub writeback_persist_sync: Option<bool>,
+    pub writeback_require_stage_before_commit: Option<bool>,
     pub writeback_recent_pending_soft_bytes: Option<u64>,
     pub writeback_recent_pending_hard_bytes: Option<u64>,
     pub bandwidth: Option<BandwidthFileConfig>,
@@ -595,6 +596,11 @@ impl CacheFileConfig {
         }
         if let Some(writeback_persist_sync) = self.writeback_persist_sync {
             cache.writeback_persist_sync = writeback_persist_sync;
+        }
+        if let Some(writeback_require_stage_before_commit) =
+            self.writeback_require_stage_before_commit
+        {
+            cache.writeback_require_stage_before_commit = writeback_require_stage_before_commit;
         }
         if let Some(writeback_recent_pending_soft_bytes) = self.writeback_recent_pending_soft_bytes
         {
@@ -926,6 +932,7 @@ cache:
   verify_cache_checksum: none
   writeback_mode: upload_before_commit
   writeback_persist_sync: false
+  writeback_require_stage_before_commit: false
   writeback_recent_pending_soft_bytes: 1073741824
   writeback_recent_pending_hard_bytes: 2147483648
   bandwidth:
@@ -960,6 +967,7 @@ cache:
             WriteBackMode::UploadBeforeCommit
         );
         assert!(!config.cache.writeback_persist_sync);
+        assert!(!config.cache.writeback_require_stage_before_commit);
         assert_eq!(config.cache.writeback_recent_pending_soft_bytes, 1073741824);
         assert_eq!(config.cache.writeback_recent_pending_hard_bytes, 2147483648);
         assert_eq!(config.cache.bandwidth.upload_limit_mibps, Some(10));
