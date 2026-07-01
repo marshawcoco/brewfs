@@ -47,7 +47,7 @@ prepare_artifacts() {
     printf 'tool\tstatus\tseconds\tlog\n' >"$artifact_dir/perf-summary.tsv"
     printf 'tool\tmethod\tops\tbytes\tseconds\tavg_ms\n' >"$artifact_dir/juicefs-object-summary.tsv"
     write_perf_profile
-    printf 'tool\tpost_fio_drain_s\tstage_blocks\tstage_bytes\tuploading\tput_bytes\tget_bytes\n' \
+    printf 'tool\tpost_write_drain_s\tstage_blocks\tstage_bytes\tuploading\tput_bytes\tget_bytes\n' \
         >"$artifact_dir/post-write-drain.tsv"
     write_juicefs_profile
 }
@@ -1055,7 +1055,7 @@ if post_write_drain_path.exists():
         ])
         for row in drain_rows:
             lines.append(
-                f"| {row.get('tool', '')} | {row.get('post_fio_drain_s', '')} | "
+                f"| {row.get('tool', '')} | {row.get('post_write_drain_s') or row.get('post_fio_drain_s', '')} | "
                 f"{row.get('stage_blocks', '')} | {row.get('stage_bytes', '')} | "
                 f"{row.get('uploading', '')} | {row.get('put_bytes', '')} | "
                 f"{row.get('get_bytes', '')} |"

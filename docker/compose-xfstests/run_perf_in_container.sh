@@ -461,7 +461,7 @@ prepare_artifacts() {
     mkdir -p "$artifact_dir/results" "$artifact_dir/tools" "$artifact_dir/diagnostics"
     touch "$artifact_dir/perf.log" "$artifact_dir/perf-summary.tsv" "$artifact_dir/report.md" >/dev/null 2>&1 || true
     printf 'tool\tstatus\tseconds\tlog\n' >"$artifact_dir/perf-summary.tsv"
-    printf 'tool\tpost_fio_drain_s\tpending_bytes\tdirty_bytes\tbuffer_dirty_bytes\n' \
+    printf 'tool\tpost_write_drain_s\tpending_bytes\tdirty_bytes\tbuffer_dirty_bytes\n' \
         >"$artifact_dir/post-write-drain.tsv"
     printf 'ts\ttool\telapsed_s\tbuffer_dirty_bytes\tlive_dirty_bytes\tlive_slices\trecent_pending_upload_bytes\trecent_uploaded_bytes\tstage_inflight_bytes\tremote_upload_inflight_bytes\ts3_put_ops\ts3_put_bytes\tbuffer_soft_sleep_ops\tbuffer_moderate_sleep_ops\tbuffer_hard_sleep_ops\tfuse_write_bytes\tupload_batch_ops\n' \
         >"$artifact_dir/writeback-samples.tsv"
@@ -787,6 +787,53 @@ wait_for_fio_post_write_drain() {
     done
 }
 
+wait_for_metadata_post_tool_drain() {
+    local tool="$1"
+    local timeout="${PERF_METADATA_POST_TOOL_DRAIN_TIMEOUT_SECS:-60}"
+    local interval="${PERF_METADATA_POST_TOOL_DRAIN_INTERVAL_SECS:-1}"
+    local threshold="${PERF_METADATA_POST_TOOL_DRAIN_PENDING_BYTES:-0}"
+    local start now elapsed pending dirty buffer_dirty drain_bytes
+
+    truthy_env "${PERF_METADATA_POST_TOOL_DRAIN:-false}" || return 0
+    case "$tool" in
+        dirstress|dirperf|metaperf|looptest|stress-ng) ;;
+        *) return 0 ;;
+    esac
+
+    info "等待 metadata 工具写回稳定: $tool (threshold=${threshold} bytes, timeout=${timeout}s)"
+    start="$(date +%s)"
+
+    while true; do
+        pending="$(numeric_stat_or_zero brewfs_writeback_recent_pending_upload_bytes)"
+        dirty="$(numeric_stat_or_zero brewfs_writeback_dirty_bytes)"
+        buffer_dirty="$(numeric_stat_or_zero brewfs_buffer_dirty_bytes)"
+        drain_bytes="$(max_u64 "$pending" "$dirty")"
+        drain_bytes="$(max_u64 "$drain_bytes" "$buffer_dirty")"
+
+        now="$(date +%s)"
+        elapsed="$((now - start))"
+
+        if (( drain_bytes <= threshold )); then
+            ok "metadata 工具写回已稳定: $tool (pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty elapsed=${elapsed}s)"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$tool" "$elapsed" "$pending" "$dirty" "$buffer_dirty" \
+                >>"$artifact_dir/post-write-drain.tsv"
+            return 0
+        fi
+
+        if (( elapsed >= timeout )); then
+            err "metadata 工具写回等待超时: $tool (pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty elapsed=${elapsed}s)"
+            printf '%s\ttimeout:%s\t%s\t%s\t%s\n' "$tool" "$elapsed" "$pending" "$dirty" "$buffer_dirty" \
+                >>"$artifact_dir/post-write-drain.tsv"
+            return 1
+        fi
+
+        if (( elapsed % 10 == 0 )); then
+            info "  metadata 写回等待中: pending=$pending dirty=$dirty buffer_dirty=$buffer_dirty elapsed=${elapsed}s"
+        fi
+        sleep "$interval"
+    done
+}
+
 drop_kernel_page_cache_if_requested() {
     if truthy_env "${PERF_FIO_DROP_CACHES:-false}" || truthy_env "${PERF_FIO_COLD_READ_DROP_CACHES:-false}"; then
         info "请求 drop_caches 以降低页缓存影响"
@@ -865,6 +912,7 @@ run_logged_tool() {
     stop_writeback_sampler "$sampler_pid"
     end="$(date +%s)"
     elapsed="$((end - start))"
+    wait_for_metadata_post_tool_drain "$tool" || status=1
     stats_snapshot_after_tool "$tool"
     redis_diag_after_tool "$tool"
 
@@ -1511,7 +1559,7 @@ if post_write_drain_path.exists():
         ])
         for row in drain_rows:
             lines.append(
-                f"| {row.get('tool', '')} | {row.get('post_fio_drain_s', '')} | "
+                f"| {row.get('tool', '')} | {row.get('post_write_drain_s') or row.get('post_fio_drain_s', '')} | "
                 f"{row.get('pending_bytes', '')} | {row.get('dirty_bytes', '')} | "
                 f"{row.get('buffer_dirty_bytes', '')} |"
             )
