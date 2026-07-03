@@ -20,7 +20,7 @@ use crate::meta::MetaLayer;
 use crate::meta::file_lock::{FileLockQuery, FileLockRange, FileLockType};
 use crate::meta::store::{MetaError, SetAttrFlags, SetAttrRequest};
 use crate::posix::NAME_MAX;
-use crate::vfs::error::VfsError;
+use crate::vfs::error::{PathHint, VfsError};
 use crate::vfs::fs::{CreateFileAtResult, FileAttr as VfsFileAttr, FileType as VfsFileType, VFS};
 use asyncfuse::Errno;
 use asyncfuse::Result as FuseResult;
@@ -412,6 +412,40 @@ where
             self.stat_ino(result.ino).await
         }
     }
+
+    async fn clear_write_privilege_bits_if_needed(
+        &self,
+        ino: i64,
+        writer_uid: u32,
+    ) -> Result<(), VfsError> {
+        if writer_uid == 0 {
+            return Ok(());
+        }
+
+        let Some(attr) = self.stat_ino(ino).await else {
+            return Err(VfsError::NotFound {
+                path: PathHint::none(),
+            });
+        };
+        if attr.kind != VfsFileType::File || attr.uid == writer_uid {
+            return Ok(());
+        }
+
+        let mut flags = SetAttrFlags::empty();
+        if attr.mode & 0o4000 != 0 {
+            flags.insert(SetAttrFlags::CLEAR_SUID);
+        }
+        if attr.mode & 0o2000 != 0 {
+            flags.insert(SetAttrFlags::CLEAR_SGID);
+        }
+        if flags.is_empty() {
+            return Ok(());
+        }
+
+        self.set_attr(ino, &SetAttrRequest::default(), flags)
+            .await
+            .map(|_| ())
+    }
 }
 
 fn fuse_lock_end_to_exclusive(end: u64) -> u64 {
@@ -748,6 +782,11 @@ where
                 .await
                 .map_err(Into::<Errno>::into)? as u32
         };
+        if n > 0 {
+            self.clear_write_privilege_bits_if_needed(ino as i64, req.uid)
+                .await
+                .map_err(Into::<Errno>::into)?;
+        }
         self.stats()
             .fuse_write_bytes
             .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
@@ -3911,6 +3950,27 @@ mod fuse_init_tests {
 
         assert_eq!(err, Errno::from(libc::EACCES));
         assert_eq!(fs.stat("/file.txt").await.unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    async fn non_owner_write_clears_suid_and_sgid_bits() {
+        let fs = new_fuse_test_vfs().await;
+        fs.create_file("/file.txt").await.unwrap();
+        let attr = fs.stat("/file.txt").await.unwrap();
+        fs.chmod(attr.ino, 0o6777).await.unwrap();
+
+        let request = request_with_ids(65534, 65534);
+        let opened = Filesystem::open(&fs, request, attr.ino as u64, libc::O_RDWR as u32)
+            .await
+            .unwrap();
+
+        let reply = Filesystem::write(&fs, request, attr.ino as u64, opened.fh, 0, b"x", 0, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(reply.written, 1);
+        assert_eq!(fs.stat("/file.txt").await.unwrap().mode & 0o7777, 0o0777);
+        fs.close(opened.fh).await.unwrap();
     }
 
     #[tokio::test]
