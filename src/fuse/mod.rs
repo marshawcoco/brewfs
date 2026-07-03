@@ -69,17 +69,31 @@ fn fuse_create_cache_ttl() -> Duration {
     Duration::ZERO
 }
 
-fn fuse_direct_io_enabled() -> bool {
-    let value = std::env::var("BREWFS_FUSE_DIRECT_IO")
-        .ok()
-        .or_else(|| std::env::var("BREWFS_FUSE_READ_DIRECT_IO").ok());
-    match value {
-        Some(value) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        None => true,
-    }
+fn fuse_direct_io_setting() -> Option<bool> {
+    env_flag("BREWFS_FUSE_DIRECT_IO")
+}
+
+fn fuse_read_direct_io_enabled() -> bool {
+    env_flag("BREWFS_FUSE_READ_DIRECT_IO").unwrap_or(false)
+}
+
+fn fuse_write_direct_io_enabled() -> bool {
+    env_flag("BREWFS_FUSE_WRITE_DIRECT_IO").unwrap_or(false)
+}
+
+fn fuse_copy_file_range_enabled() -> bool {
+    env_flag("BREWFS_FUSE_COPY_FILE_RANGE").unwrap_or(false)
+}
+
+fn env_flag(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(!matches!(normalized.as_str(), "0" | "false" | "no" | "off"))
+        }
+    })
 }
 
 fn fuse_keep_cache_enabled() -> bool {
@@ -98,7 +112,13 @@ fn fuse_open_reply_flags(read: bool, write: bool) -> u32 {
     } else {
         0
     };
-    if (read || write) && fuse_direct_io_enabled() {
+    let read_only = read && !write;
+    let write_only = write && !read;
+    let direct_io = fuse_direct_io_setting().unwrap_or_else(|| {
+        (write_only && fuse_write_direct_io_enabled())
+            || (read_only && fuse_read_direct_io_enabled())
+    });
+    if (read || write) && direct_io {
         flags |= FOPEN_DIRECT_IO;
     }
     flags
@@ -237,6 +257,7 @@ where
         if !self.take_posix_lock_owner(ino as i64, lock_owner as i64) {
             return;
         }
+        self.forget_fuse_lock_owner(ino as i64, lock_owner as i64);
         let _ = self
             .set_plock_ino(
                 ino as i64,
@@ -250,6 +271,28 @@ where
                 0,
             )
             .await;
+    }
+
+    async fn unlock_handle_locks(&self, ino: u64, fh: u64) {
+        if fh == 0 {
+            return;
+        }
+
+        for owner in self.take_fuse_lock_owners_for_handle(ino as i64, fh) {
+            let _ = self
+                .set_plock_ino(
+                    ino as i64,
+                    owner,
+                    false,
+                    FileLockType::UnLock,
+                    FileLockRange {
+                        start: 0,
+                        end: u64::MAX,
+                    },
+                    0,
+                )
+                .await;
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -629,7 +672,7 @@ where
     // Read file: inode-based read
     async fn read(
         &self,
-        _req: Request,
+        req: Request,
         ino: u64,
         fh: u64,
         offset: u64,
@@ -651,6 +694,8 @@ where
             &self.stats().fuse_read_lat_us,
         );
         debug!(ino, fh, offset, size, "fuse.read");
+        self.wait_for_prior_fuse_cached_writes(ino as i64, req.unique)
+            .await;
 
         let data = if fh != 0 {
             match self.read(fh, offset, size as usize).await {
@@ -734,6 +779,11 @@ where
             write_flags,
             "fuse.write"
         );
+        let _cached_write_guard = if write_flags & FUSE_WRITE_CACHE != 0 && !data.is_empty() {
+            Some(self.begin_fuse_cached_write(ino as i64, req.unique))
+        } else {
+            None
+        };
         if fh == 0 && !data.is_empty() {
             self.ensure_access_allowed(ino as i64, req.uid, req.gid, inode_mutation_access_mask())
                 .await?;
@@ -1745,6 +1795,7 @@ where
         }
         debug!(fh, "fuse.release");
         self.unlock_owner_locks(inode, lock_owner).await;
+        self.unlock_handle_locks(inode, fh).await;
         self.close(fh).await.map_err(Errno::from)?;
         Ok(())
     }
@@ -1791,9 +1842,15 @@ where
             )
             .await?;
         }
-        self.fallocate_ino(inode as i64, offset, length)
-            .await
-            .map_err(Errno::from)
+        if fh != 0 {
+            self.fallocate_handle(fh, inode as i64, offset, length)
+                .await
+                .map_err(Errno::from)
+        } else {
+            self.fallocate_ino(inode as i64, offset, length)
+                .await
+                .map_err(Errno::from)
+        }
     }
 
     async fn lseek(
@@ -1861,6 +1918,9 @@ where
 
         if flags != 0 {
             return Err(libc::EINVAL.into());
+        }
+        if !fuse_copy_file_range_enabled() {
+            return Err(libc::EOPNOTSUPP.into());
         }
 
         let copied = self
@@ -2093,7 +2153,7 @@ where
         &self,
         _req: Request,
         inode: u64,
-        _fh: u64,
+        fh: u64,
         lock_owner: u64,
         start: u64,
         end: u64,
@@ -2125,6 +2185,7 @@ where
         {
             Ok(()) => {
                 self.remember_posix_lock_owner(inode as i64, lock_owner as i64, fl_type);
+                self.remember_fuse_lock_owner(inode as i64, fh, lock_owner as i64, fl_type);
                 Ok(())
             }
             Err(e) => Err(Errno::from(e)),
@@ -4052,17 +4113,18 @@ mod fuse_init_tests {
     }
 
     #[test]
-    fn open_reply_flags_use_direct_io_for_read_only_handles_by_default() {
+    fn open_reply_flags_default_to_buffered_handles_for_mmap() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
             std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
             std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
         }
 
-        assert_eq!(fuse_open_reply_flags(true, false), FOPEN_DIRECT_IO);
-        assert_eq!(fuse_open_reply_flags(true, true), FOPEN_DIRECT_IO);
-        assert_eq!(fuse_open_reply_flags(false, true), FOPEN_DIRECT_IO);
+        assert_eq!(fuse_open_reply_flags(true, false), 0);
+        assert_eq!(fuse_open_reply_flags(true, true), 0);
+        assert_eq!(fuse_open_reply_flags(false, true), 0);
     }
 
     #[test]
@@ -4077,16 +4139,18 @@ mod fuse_init_tests {
     }
 
     #[test]
-    fn open_reply_flags_keep_direct_io_for_read_only_handles_explicitly() {
+    fn open_reply_flags_can_opt_into_read_only_direct_io() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
             std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
             std::env::set_var("BREWFS_FUSE_READ_DIRECT_IO", "1");
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
         }
 
         assert_eq!(fuse_open_reply_flags(true, false), FOPEN_DIRECT_IO);
-        assert_eq!(fuse_open_reply_flags(true, true), FOPEN_DIRECT_IO);
+        assert_eq!(fuse_open_reply_flags(true, true), 0);
+        assert_eq!(fuse_open_reply_flags(false, true), 0);
 
         unsafe {
             std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
@@ -4094,20 +4158,105 @@ mod fuse_init_tests {
     }
 
     #[test]
-    fn open_reply_flags_can_disable_direct_io_for_read_only_handles() {
+    fn open_reply_flags_can_opt_into_all_handle_direct_io() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("BREWFS_FUSE_DIRECT_IO", "1");
+            std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
+            std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
+        }
+
+        assert_eq!(fuse_open_reply_flags(true, false), FOPEN_DIRECT_IO);
+        assert_eq!(fuse_open_reply_flags(true, true), FOPEN_DIRECT_IO);
+        assert_eq!(fuse_open_reply_flags(false, true), FOPEN_DIRECT_IO);
+
+        unsafe {
+            std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
+        }
+    }
+
+    #[test]
+    fn open_reply_flags_direct_io_off_overrides_read_only_opt_in() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var("BREWFS_FUSE_DIRECT_IO", "0");
             std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
-            std::env::set_var("BREWFS_FUSE_READ_DIRECT_IO", "0");
+            std::env::set_var("BREWFS_FUSE_READ_DIRECT_IO", "1");
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
         }
 
         assert_eq!(fuse_open_reply_flags(true, false), 0);
         assert_eq!(fuse_open_reply_flags(true, true), 0);
+        assert_eq!(fuse_open_reply_flags(false, true), 0);
 
         unsafe {
             std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
             std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
+        }
+    }
+
+    #[test]
+    fn open_reply_flags_ignore_empty_env_values() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("BREWFS_FUSE_DIRECT_IO", "");
+            std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
+            std::env::set_var("BREWFS_FUSE_READ_DIRECT_IO", "");
+            std::env::set_var("BREWFS_FUSE_WRITE_DIRECT_IO", "");
+        }
+
+        assert_eq!(fuse_open_reply_flags(true, false), 0);
+        assert_eq!(fuse_open_reply_flags(true, true), 0);
+        assert_eq!(fuse_open_reply_flags(false, true), 0);
+
+        unsafe {
+            std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
+            std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
+        }
+    }
+
+    #[test]
+    fn fuse_copy_file_range_defaults_off_and_can_opt_in() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("BREWFS_FUSE_COPY_FILE_RANGE");
+        }
+
+        assert!(!fuse_copy_file_range_enabled());
+
+        unsafe {
+            std::env::set_var("BREWFS_FUSE_COPY_FILE_RANGE", "1");
+        }
+        assert!(fuse_copy_file_range_enabled());
+
+        unsafe {
+            std::env::set_var("BREWFS_FUSE_COPY_FILE_RANGE", "");
+        }
+        assert!(!fuse_copy_file_range_enabled());
+
+        unsafe {
+            std::env::remove_var("BREWFS_FUSE_COPY_FILE_RANGE");
+        }
+    }
+
+    #[test]
+    fn open_reply_flags_can_opt_into_write_only_direct_io() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
+            std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
+            std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
+            std::env::set_var("BREWFS_FUSE_WRITE_DIRECT_IO", "1");
+        }
+
+        assert_eq!(fuse_open_reply_flags(true, false), 0);
+        assert_eq!(fuse_open_reply_flags(true, true), 0);
+        assert_eq!(fuse_open_reply_flags(false, true), FOPEN_DIRECT_IO);
+
+        unsafe {
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
         }
     }
 
@@ -4118,16 +4267,12 @@ mod fuse_init_tests {
             std::env::remove_var("BREWFS_FUSE_DIRECT_IO");
             std::env::set_var("BREWFS_FUSE_KEEP_CACHE", "1");
             std::env::remove_var("BREWFS_FUSE_READ_DIRECT_IO");
+            std::env::remove_var("BREWFS_FUSE_WRITE_DIRECT_IO");
         }
 
-        assert_eq!(
-            fuse_open_reply_flags(true, false),
-            FOPEN_KEEP_CACHE | FOPEN_DIRECT_IO
-        );
-        assert_eq!(
-            fuse_open_reply_flags(true, true),
-            FOPEN_KEEP_CACHE | FOPEN_DIRECT_IO
-        );
+        assert_eq!(fuse_open_reply_flags(true, false), FOPEN_KEEP_CACHE);
+        assert_eq!(fuse_open_reply_flags(true, true), FOPEN_KEEP_CACHE);
+        assert_eq!(fuse_open_reply_flags(false, true), FOPEN_KEEP_CACHE);
 
         unsafe {
             std::env::remove_var("BREWFS_FUSE_KEEP_CACHE");
