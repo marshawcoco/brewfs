@@ -4,8 +4,10 @@ services:
     container_name: redis-brewfs-perf
     command: >
       redis-server
+      --save ""
       --appendonly yes
       --appendfsync everysec
+      --stop-writes-on-bgsave-error no
       --loglevel warning
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

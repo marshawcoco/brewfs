@@ -198,6 +198,10 @@ EOF
             || -n "${BREWFS_UPLOAD_CONCURRENCY:-}" \
             || -n "${BREWFS_POPULATE_WRITE_CACHE_AFTER_UPLOAD:-}" \
             || -n "${BREWFS_PERSIST_WRITE_CACHE_AFTER_UPLOAD:-}" \
+            || -n "${BREWFS_WRITEBACK_MODE:-}" \
+            || -n "${BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT:-}" \
+            || -n "${BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES:-}" \
+            || -n "${BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES:-}" \
             || -n "${BREWFS_MEMORY_BUDGET_BYTES:-}" \
             || -n "${BREWFS_VERIFY_CACHE_CHECKSUM:-}" ]]; then
             echo
@@ -212,6 +216,10 @@ EOF
             [[ -n "${BREWFS_UPLOAD_CONCURRENCY:-}" ]] && echo "  upload_concurrency: ${BREWFS_UPLOAD_CONCURRENCY}"
             [[ -n "${BREWFS_POPULATE_WRITE_CACHE_AFTER_UPLOAD:-}" ]] && echo "  populate_write_cache_after_upload: ${BREWFS_POPULATE_WRITE_CACHE_AFTER_UPLOAD}"
             [[ -n "${BREWFS_PERSIST_WRITE_CACHE_AFTER_UPLOAD:-}" ]] && echo "  persist_write_cache_after_upload: ${BREWFS_PERSIST_WRITE_CACHE_AFTER_UPLOAD}"
+            [[ -n "${BREWFS_WRITEBACK_MODE:-}" ]] && echo "  writeback_mode: ${BREWFS_WRITEBACK_MODE}"
+            [[ -n "${BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT:-}" ]] && echo "  writeback_require_stage_before_commit: ${BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT}"
+            [[ -n "${BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES:-}" ]] && echo "  writeback_recent_pending_soft_bytes: ${BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES}"
+            [[ -n "${BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES:-}" ]] && echo "  writeback_recent_pending_hard_bytes: ${BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES}"
             [[ -n "${BREWFS_MEMORY_BUDGET_BYTES:-}" ]] && echo "  memory_budget_bytes: ${BREWFS_MEMORY_BUDGET_BYTES}"
             [[ -n "${BREWFS_VERIFY_CACHE_CHECKSUM:-}" ]] && echo "  verify_cache_checksum: ${BREWFS_VERIFY_CACHE_CHECKSUM}"
         fi
@@ -272,6 +280,19 @@ EOF
     append_env_export BREWFS_MOUNT_WAIT_SECS "60"
     append_env_export BREWFS_PRE_MOUNT_WAIT_SECS "10"
     append_env_export BREWFS_MOUNT_READY_DELAY_SECS "1"
+    append_env_export BREWFS_CACHE_TTL_MS
+    append_env_export BREWFS_FUSE_DIRECT_IO
+    append_env_export BREWFS_FUSE_READ_DIRECT_IO
+    append_env_export BREWFS_FUSE_WRITE_DIRECT_IO
+    append_env_export BREWFS_FUSE_WRITEBACK
+    append_env_export BREWFS_WRITEBACK_MODE
+    append_env_export BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT
+    append_env_export BREWFS_WRITEBACK_RECENT_PENDING_SOFT_BYTES
+    append_env_export BREWFS_WRITEBACK_RECENT_PENDING_HARD_BYTES
+    append_env_export BREWFS_CACHED_BLOCK_ASSEMBLER
+    append_env_export BREWFS_CACHED_SUB_BLOCK_IDLE_GRACE_MS
+    append_env_export BREWFS_CACHED_SUB_BLOCK_TOO_MANY_MIN_AGE_MS
+    append_env_export BREWFS_DEBUG_CACHED_WRITE_OFFSET
     append_env_export RUST_LOG
 
     if [[ -n "$baked_fuse_log_file" ]]; then
