@@ -102,10 +102,14 @@ mkdir -p "$ARTIFACTS_DIR"
 
 # xfstests generic/074 generates many 512B random overwrite slices.  Keep the
 # correctness harness resource-bounded while preserving production defaults for
-# normal mounts and perf profiles.
+# normal mounts and perf profiles.  Use a small positive SSD cache budget:
+# zero means "unlimited" in the cache layer, and too large a budget can exhaust
+# Docker overlay inodes before LRU eviction catches up.
 export BREWFS_CACHE_ROOT="${BREWFS_CACHE_ROOT:-/var/lib/brewfs/cache}"
 export BREWFS_READ_MEMORY_BYTES="${BREWFS_READ_MEMORY_BYTES:-268435456}"
+export BREWFS_READ_SSD_BYTES="${BREWFS_READ_SSD_BYTES:-1048576}"
 export BREWFS_WRITE_MEMORY_BYTES="${BREWFS_WRITE_MEMORY_BYTES:-134217728}"
+export BREWFS_WRITE_SSD_BYTES="${BREWFS_WRITE_SSD_BYTES:-1048576}"
 export BREWFS_DIRTY_SLICE_TARGET_SIZE="${BREWFS_DIRTY_SLICE_TARGET_SIZE:-4194304}"
 export BREWFS_DIRTY_SLICE_MAX_AGE_MS="${BREWFS_DIRTY_SLICE_MAX_AGE_MS:-500}"
 export BREWFS_UPLOAD_CONCURRENCY="${BREWFS_UPLOAD_CONCURRENCY:-4}"
@@ -115,6 +119,11 @@ export BREWFS_MEMORY_BUDGET_BYTES="${BREWFS_MEMORY_BUDGET_BYTES:-536870912}"
 ts="$(date +%s)-$RANDOM"
 PROJECT_NAME="brewfs-${ts}"
 COMPOSE_ARGS=(-f "$COMPOSE_FILE" -p "$PROJECT_NAME")
+DEFAULT_RUSTFS_DATA_HOST_DIR="$ARTIFACTS_DIR/rustfs-data-${ts}"
+RUSTFS_DATA_HOST_DIR_WAS_SET="${RUSTFS_DATA_HOST_DIR:+1}"
+export RUSTFS_DATA_HOST_DIR="${RUSTFS_DATA_HOST_DIR:-$DEFAULT_RUSTFS_DATA_HOST_DIR}"
+mkdir -p "$RUSTFS_DATA_HOST_DIR"
+chmod 0777 "$RUSTFS_DATA_HOST_DIR"
 
 cleanup() {
     if [[ "$KEEP" == true ]]; then
@@ -122,6 +131,9 @@ cleanup() {
         return 0
     fi
     docker compose "${COMPOSE_ARGS[@]}" down -v >/dev/null 2>&1 || true
+    if [[ -z "$RUSTFS_DATA_HOST_DIR_WAS_SET" ]]; then
+        rm -rf "$RUSTFS_DATA_HOST_DIR"
+    fi
 }
 trap cleanup EXIT INT TERM
 

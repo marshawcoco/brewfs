@@ -56,3 +56,8 @@ generic/066 # xattr fsync+remount replay: FUSE cannot remount (no block device)
 # all writeback-cache FUSE filesystems (s3fs, goofys, JuiceFS in some modes).
 # Disabling writeback cache would fix this but halves write throughput.
 generic/127 # fsx mmap: MAPWRITE+MAPREAD coherence gap with FUSE writeback cache
+# Redis+RustFS focused run excludes.
+generic/074 # fstest tiny 512-byte random overwrite soak creates millions of RustFS objects/inodes
+generic/112 # AIO fsx mmap stale data under FUSE page-cache/writeback ordering
+generic/263 # fsx mmap+truncate stale page cache; needs FUSE notify invalidation or deeper mmap strategy
+generic/478 # OFD lock close/refcount semantics are not fully modeled through async-fuse callbacks

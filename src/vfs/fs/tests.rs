@@ -51,6 +51,30 @@ fn test_file_attr(ino: i64) -> super::FileAttr {
 }
 
 #[tokio::test]
+async fn test_fuse_cached_write_order_waits_for_earlier_unique() {
+    let order = Arc::new(super::FuseCachedWriteOrder::default());
+    let guard = order.begin(7, 10);
+
+    tokio::time::timeout(Duration::from_millis(20), order.wait_for_prior(8, 11))
+        .await
+        .expect("different inode should not wait");
+    tokio::time::timeout(Duration::from_millis(20), order.wait_for_prior(7, 10))
+        .await
+        .expect("same unique should not wait");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), order.wait_for_prior(7, 11))
+            .await
+            .is_err(),
+        "later reads should wait for earlier cached writes on the same inode"
+    );
+
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(1), order.wait_for_prior(7, 11))
+        .await
+        .expect("dropping the write guard should wake waiters");
+}
+
+#[tokio::test]
 async fn test_recently_unlinked_cleanup_is_not_run_on_every_threshold_insert() {
     let layout = ChunkLayout::default();
     let store = InMemoryBlockStore::new();
@@ -1092,6 +1116,9 @@ mod io_tests {
         fs.create_file("/cached.bin").await.unwrap();
         let attr = fs.stat("/cached.bin").await.unwrap();
         let data = b"cached-writeback-data";
+        fs.fallocate_ino(attr.ino, 0, data.len() as u64)
+            .await
+            .unwrap();
 
         fs.write_cached_ino(attr.ino, 0, data, 0).await.unwrap();
 
@@ -1258,6 +1285,9 @@ mod io_tests {
         fs.create_file("/setattr-truncate.bin").await.unwrap();
         let attr = fs.stat("/setattr-truncate.bin").await.unwrap();
         let data = b"pending-data-before-ftruncate";
+        fs.fallocate_ino(attr.ino, 0, data.len() as u64)
+            .await
+            .unwrap();
 
         fs.write_cached_ino(attr.ino, 0, data, 0).await.unwrap();
         let inode = fs.ensure_inode_registered(attr.ino).await.unwrap();
@@ -1331,6 +1361,9 @@ mod io_tests {
         fs.create_file("/falloc-pending.bin").await.unwrap();
         let attr = fs.stat("/falloc-pending.bin").await.unwrap();
         let data = b"pending-mmap-data";
+        fs.fallocate_ino(attr.ino, 0, data.len() as u64)
+            .await
+            .unwrap();
 
         fs.write_cached_ino(attr.ino, 0, data, 1).await.unwrap();
         let inode = fs.ensure_inode_registered(attr.ino).await.unwrap();
@@ -1351,6 +1384,70 @@ mod io_tests {
         let out = read_path(&fs, "/falloc-pending.bin", 0, st.size as usize).await;
         assert_eq!(&out[..data.len()], data);
         assert_eq!(&out[data.len()..], vec![0u8; 64].as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_fs_fallocate_handle_defers_metadata_until_flush() {
+        let layout = ChunkLayout::default();
+        let store = InMemoryBlockStore::new();
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta_store = meta_handle.store();
+        let fs = VFS::new(layout, store, meta_store).await.unwrap();
+
+        fs.create_file("/falloc-handle.bin").await.unwrap();
+        let attr = fs.stat("/falloc-handle.bin").await.unwrap();
+        let fh = fs
+            .open(attr.ino, attr.clone(), true, true, false)
+            .await
+            .unwrap();
+
+        fs.fallocate_handle(fh, attr.ino, 128, 64).await.unwrap();
+
+        assert_eq!(fs.stat_ino(attr.ino).await.unwrap().size, 192);
+        assert_eq!(
+            fs.meta_layer().stat(attr.ino).await.unwrap().unwrap().size,
+            0
+        );
+
+        fs.flush(fh).await.unwrap();
+        assert_eq!(
+            fs.meta_layer().stat(attr.ino).await.unwrap().unwrap().size,
+            192
+        );
+
+        fs.close(fh).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fs_sparse_fallocate_cached_zero_tail_does_not_overwrite_data() {
+        let layout = ChunkLayout::default();
+        let store = InMemoryBlockStore::new();
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta_store = meta_handle.store();
+        let fs = VFS::new(layout, store, meta_store).await.unwrap();
+
+        fs.create_file("/falloc-zero-tail.bin").await.unwrap();
+        let attr = fs.stat("/falloc-zero-tail.bin").await.unwrap();
+        let fh = fs
+            .open(attr.ino, attr.clone(), true, true, false)
+            .await
+            .unwrap();
+
+        fs.fallocate_handle(fh, attr.ino, 0, 4096).await.unwrap();
+        let mut page = vec![0u8; 4096];
+        page[123] = 0x78;
+        fs.write_cached_ino(attr.ino, 0, &page, 10).await.unwrap();
+
+        let stale_zero_page = vec![0u8; 4096];
+        fs.write_cached_ino(attr.ino, 0, &stale_zero_page, 11)
+            .await
+            .unwrap();
+        fs.flush_inode(attr.ino as u64).await;
+
+        let out = read_path(&fs, "/falloc-zero-tail.bin", 120, 8).await;
+        assert_eq!(out[3], 0x78);
+
+        fs.close(fh).await.unwrap();
     }
 
     #[tokio::test]
@@ -2456,6 +2553,16 @@ mod truncate_flush_tests {
             .unwrap();
 
         let block = test_layout().block_size as usize;
+        let req = SetAttrRequest {
+            size: Some(block as u64 * 32),
+            ..Default::default()
+        };
+        op_timeout(
+            "size file before cached writes",
+            fs.set_attr(ino, &req, SetAttrFlags::empty()),
+        )
+        .await
+        .unwrap();
 
         // Use write_cached_ino (mimics FUSE_WRITE_CACHE) to create dirty
         // slices without an explicit flush — just like the kernel does.
