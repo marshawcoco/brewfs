@@ -12,11 +12,11 @@ use crate::meta::store::{
 };
 use crate::posix::NAME_MAX;
 use dashmap::{DashMap, Entry};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 // Re-export types from meta::store for convenience
 pub use crate::meta::store::{DirEntry, FileAttr, FileType};
@@ -175,6 +175,16 @@ where
         true
     }
 
+    fn take_write_dirty_for_inode(&self, ino: i64) -> bool {
+        let mut dirty = false;
+        for fh in self.handles_for(ino) {
+            if let Some(handle) = self.handles.get(&fh) {
+                dirty |= handle.take_write_dirty();
+            }
+        }
+        dirty
+    }
+
     fn handles_for(&self, ino: i64) -> Vec<u64> {
         self.inode_handles
             .get(&ino)
@@ -267,10 +277,89 @@ where
     reader: Arc<DataReader<S, M>>,
     writer: Arc<DataWriter<S, M>>,
     append_locks: DashMap<i64, Arc<Mutex<()>>>,
+    fuse_cached_write_order: Arc<FuseCachedWriteOrder>,
     posix_lock_owners: DashMap<(i64, i64), ()>,
+    fuse_lock_owners_by_handle: DashMap<(i64, u64, i64), ()>,
     pub(crate) stats: Arc<crate::vfs::stats::FsStats>,
     memory_budget: Option<MemoryBudget>,
     vfs_timing_enabled: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct FuseCachedWriteOrder {
+    pending: StdMutex<BTreeMap<i64, BTreeSet<u64>>>,
+    notify: Notify,
+}
+
+pub(crate) struct FuseCachedWriteGuard {
+    order: Arc<FuseCachedWriteOrder>,
+    ino: i64,
+    unique: u64,
+}
+
+impl FuseCachedWriteOrder {
+    fn begin(self: &Arc<Self>, ino: i64, unique: u64) -> FuseCachedWriteGuard {
+        self.pending
+            .lock()
+            .expect("fuse cached write order lock poisoned")
+            .entry(ino)
+            .or_default()
+            .insert(unique);
+        FuseCachedWriteGuard {
+            order: Arc::clone(self),
+            ino,
+            unique,
+        }
+    }
+
+    async fn wait_for_prior(&self, ino: i64, unique: u64) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if !self.has_prior(ino, unique) {
+                return;
+            }
+
+            notified.await;
+        }
+    }
+
+    fn has_prior(&self, ino: i64, unique: u64) -> bool {
+        self.pending
+            .lock()
+            .expect("fuse cached write order lock poisoned")
+            .get(&ino)
+            .and_then(|pending| pending.iter().next().copied())
+            .is_some_and(|first| first < unique)
+    }
+
+    fn finish(&self, ino: i64, unique: u64) {
+        let removed = {
+            let mut pending = self
+                .pending
+                .lock()
+                .expect("fuse cached write order lock poisoned");
+            let Some(writes) = pending.get_mut(&ino) else {
+                return;
+            };
+            let removed = writes.remove(&unique);
+            if writes.is_empty() {
+                pending.remove(&ino);
+            }
+            removed
+        };
+        if removed {
+            self.notify.notify_waiters();
+        }
+    }
+}
+
+impl Drop for FuseCachedWriteGuard {
+    fn drop(&mut self) {
+        self.order.finish(self.ino, self.unique);
+    }
 }
 
 impl<S, M> VfsState<S, M>
@@ -383,7 +472,9 @@ where
             reader,
             writer,
             append_locks: DashMap::new(),
+            fuse_cached_write_order: Arc::new(FuseCachedWriteOrder::default()),
             posix_lock_owners: DashMap::new(),
+            fuse_lock_owners_by_handle: DashMap::new(),
             stats: Arc::new(crate::vfs::stats::FsStats::new()),
             memory_budget,
             vfs_timing_enabled: vfs_timing_enabled_from_env(),
@@ -587,9 +678,10 @@ where
     background_tasks: Option<VfsBackgroundTasks>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct CreateFileAtResult {
     pub(crate) ino: i64,
+    pub(crate) attr: Option<FileAttr>,
     pub(crate) created: bool,
     pub(crate) attrs_applied: bool,
 }
@@ -1057,6 +1149,17 @@ where
         self.state.handles.mark_write_dirty(fh)
     }
 
+    pub(crate) fn begin_fuse_cached_write(&self, ino: i64, unique: u64) -> FuseCachedWriteGuard {
+        self.state.fuse_cached_write_order.begin(ino, unique)
+    }
+
+    pub(crate) async fn wait_for_prior_fuse_cached_writes(&self, ino: i64, unique: u64) {
+        self.state
+            .fuse_cached_write_order
+            .wait_for_prior(ino, unique)
+            .await;
+    }
+
     pub(crate) fn handle_allows_write_for_inode(&self, fh: u64, ino: i64) -> bool {
         self.file_handle(fh)
             .map(|handle| handle.ino == ino && handle.flags.write)
@@ -1289,20 +1392,32 @@ where
     /// doesn't call the write() callback
     pub(crate) async fn update_mtime_ctime(&self, ino: i64) -> Result<(), VfsError> {
         let now = Self::current_timestamp_nanos()?;
+        let local_size = self.inode_size_cached(ino);
 
         let req = SetAttrRequest {
+            size: local_size,
             mtime: Some(now),
             ctime: Some(now),
             ..Default::default()
         };
 
-        self.meta_set_attr(ino, &req, SetAttrFlags::empty()).await?;
+        let mut attr = self.meta_set_attr(ino, &req, SetAttrFlags::empty()).await?;
+        if let Some(size) = local_size {
+            attr.size = attr.size.max(size);
+            if let Some(inode) = self.state.inodes.get(&ino) {
+                inode.extend_committed_size(size);
+            }
+        }
 
         // Update handle cache if exists
-        if let Some(mut attr) = self.state.handles.attr_for_inode(ino) {
-            attr.mtime = now;
-            attr.ctime = now;
-            self.state.handles.update_attr_for_inode(ino, &attr);
+        if let Some(mut cached_attr) = self.state.handles.attr_for_inode(ino) {
+            if let Some(size) = local_size {
+                cached_attr.size = cached_attr.size.max(size);
+            }
+            cached_attr.size = cached_attr.size.max(attr.size);
+            cached_attr.mtime = now;
+            cached_attr.ctime = now;
+            self.state.handles.update_attr_for_inode(ino, &cached_attr);
         }
 
         Ok(())
@@ -1540,7 +1655,7 @@ where
             );
             if let Some((mode, uid, gid)) = create_attrs {
                 match self
-                    .meta_create_node(
+                    .meta_create_node_with_attr(
                         parent_ino,
                         name.to_string(),
                         FileType::File,
@@ -1551,23 +1666,24 @@ where
                     )
                     .await
                 {
-                    Ok(ino) => Ok((ino, true)),
+                    Ok(created) => Ok((created.ino, created.attr, true)),
                     Err(VfsError::Unsupported) => self
-                        .meta_create_file(parent_ino, name.to_string())
+                        .meta_create_file_with_attr(parent_ino, name.to_string())
                         .await
-                        .map(|ino| (ino, false)),
+                        .map(|created| (created.ino, created.attr, false)),
                     Err(err) => Err(err),
                 }
             } else {
-                self.meta_create_file(parent_ino, name.to_string())
+                self.meta_create_file_with_attr(parent_ino, name.to_string())
                     .await
-                    .map(|ino| (ino, false))
+                    .map(|created| (created.ino, created.attr, false))
             }
         };
 
         match create_result {
-            Ok((ino, attrs_applied)) => Ok(CreateFileAtResult {
+            Ok((ino, attr, attrs_applied)) => Ok(CreateFileAtResult {
                 ino,
+                attr,
                 created: true,
                 attrs_applied,
             }),
@@ -1590,6 +1706,7 @@ where
                 } else {
                     Ok(CreateFileAtResult {
                         ino: existing,
+                        attr: Some(attr),
                         created: false,
                         attrs_applied: false,
                     })
@@ -1725,6 +1842,44 @@ where
             );
             self.meta_stat_required(ino, PathHint::none()).await?
         };
+        if attr.kind == FileType::Dir {
+            return Err(VfsError::IsADirectory {
+                path: PathHint::none(),
+            });
+        }
+
+        self.unlink_at_with_known_attr_inner(parent_ino, name, ino, attr)
+            .await
+    }
+
+    /// Remove a regular file or symlink after the caller has already resolved
+    /// the child inode and attributes. This avoids duplicate lookup/stat work
+    /// on the FUSE unlink path while keeping store-level unlink checks.
+    #[tracing::instrument(level = "debug", skip(self, attr), fields(parent_ino, name, ino))]
+    pub(crate) async fn unlink_at_with_known_attr(
+        &self,
+        parent_ino: i64,
+        name: &str,
+        ino: i64,
+        attr: FileAttr,
+    ) -> Result<(), VfsError> {
+        let _total_timer = self.vfs_timing_timer(
+            &self.stats().vfs_unlink_total_ops,
+            &self.stats().vfs_unlink_total_lat_us,
+        );
+        Self::validate_entry_name(name)?;
+
+        self.unlink_at_with_known_attr_inner(parent_ino, name, ino, attr)
+            .await
+    }
+
+    async fn unlink_at_with_known_attr_inner(
+        &self,
+        parent_ino: i64,
+        name: &str,
+        ino: i64,
+        attr: FileAttr,
+    ) -> Result<(), VfsError> {
         if attr.kind == FileType::Dir {
             return Err(VfsError::IsADirectory {
                 path: PathHint::none(),
@@ -2355,6 +2510,67 @@ where
         Ok(())
     }
 
+    pub async fn fallocate_handle(
+        &self,
+        fh: u64,
+        ino: i64,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), VfsError> {
+        let handle = self.file_handle_required(fh)?;
+        if handle.ino != ino {
+            return Err(VfsError::StaleNetworkFileHandle);
+        }
+        if !handle.flags.write {
+            return Err(VfsError::PermissionDenied {
+                path: PathHint::none(),
+            });
+        }
+
+        let attr = handle.attr();
+        if matches!(attr.kind, FileType::Dir) {
+            return Err(VfsError::IsADirectory {
+                path: PathHint::none(),
+            });
+        }
+        if attr.kind != FileType::File {
+            return Err(VfsError::InvalidInput);
+        }
+        if length == 0 {
+            return Ok(());
+        }
+
+        let end = offset.checked_add(length).ok_or(VfsError::FileTooLarge)?;
+        let current_size = self.inode_size_cached(ino).unwrap_or(attr.size);
+        if end <= current_size {
+            return Ok(());
+        }
+
+        // The handle path is used by FUSE fallocate while the file is open.
+        // BrewFS represents the newly allocated range as a sparse hole, so a
+        // per-byte statfs round-trip would not reserve real backend space and
+        // makes mmap+fallocate workloads prohibitively slow. Keep the strict
+        // ENOSPC check on fallocate_ino(), which is used by metadata-persistent
+        // callers.
+        let _handle_guard = handle.lock_write().await;
+        let inode = self.ensure_inode_registered(ino).await?;
+        let writer = self.state.writer.ensure_file(inode);
+        writer
+            .record_sparse_fallocate(current_size, end - current_size)
+            .await
+            .map_err(VfsError::from)?;
+        self.extend_local_file_size(ino, end);
+
+        let now = Self::current_timestamp_nanos()?;
+        let mut attr = attr;
+        attr.size = attr.size.max(end);
+        attr.mtime = now;
+        attr.ctime = now;
+        self.state.handles.update_attr_for_inode(ino, &attr);
+        handle.mark_write_dirty();
+        Ok(())
+    }
+
     async fn ensure_fallocate_space_available(
         &self,
         current_size: u64,
@@ -2652,20 +2868,16 @@ where
 
         // We intentionally do NOT call flush_if_exists here: blocking every
         // read on a full flush+commit cycle turns random-read-heavy workloads
-        // into commit-bound traffic.  Read-write handles still need one
-        // narrower guard for writeback mode:
-        // if metadata has been committed before the remote object upload
-        // finished, the reader must not fetch that range from the backend yet.
-        // Waiting only for already-committed pending uploads preserves
-        // read-after-write correctness without freezing unrelated live dirty
-        // slices on every mixed randrw read.
-        if handle.flags.read && handle.flags.write {
-            self.state
-                .writer
-                .wait_committed_uploads_for_range(handle.ino as u64, offset, actual_len)
-                .await
-                .map_err(VfsError::from)?;
-        }
+        // into commit-bound traffic.  Still, writeback mode can make metadata
+        // visible before the remote object upload completes.  Any reader, even
+        // a read-only handle opened after close(), must wait before fetching an
+        // overlapping range from the backend; otherwise mmap/read-after-close
+        // can observe a zero-length or stale object.
+        self.state
+            .writer
+            .wait_committed_uploads_for_range(handle.ino as u64, offset, actual_len)
+            .await
+            .map_err(VfsError::from)?;
         // Read committed data from the reader cache first, then overlay any
         // uncommitted dirty writes on top.
         // There is a narrow race where commit_chunk pops a just-committed
@@ -2889,11 +3101,6 @@ where
             .write_at_cached(offset, data, creation_unique)
             .await
             .map_err(VfsError::from)?;
-
-        let new_end = offset + written as u64;
-        if new_end > inode.file_size() {
-            self.extend_local_file_size(ino, new_end);
-        }
 
         Ok(written)
     }
@@ -3168,7 +3375,7 @@ where
         if handle.flags.write {
             let _handle_guard = handle.lock_write().await;
 
-            let had_write = handle.take_write_dirty();
+            let had_write = self.state.handles.take_write_dirty_for_inode(handle.ino);
             let flushed_pending = self
                 .state
                 .writer
@@ -3221,7 +3428,18 @@ where
             self.state.writer.release(handle.ino as u64).await;
         }
 
-        self.meta_record_close(handle.ino).await?;
+        if discard_unlinked {
+            self.meta_record_close(handle.ino).await?;
+        } else {
+            self.meta_record_close_with_attr(
+                handle.ino,
+                handle.attr(),
+                handle.flags.read,
+                handle.flags.write,
+                handle.flags.append,
+            )
+            .await?;
+        }
 
         tracing::trace!(fh, ino = handle.ino, "vfs.close_done");
         Ok(())
@@ -3237,7 +3455,7 @@ where
         let handle = self.file_handle_required(fh)?;
 
         tracing::info!(fh, ino = handle.ino, "vfs.flush_handle_start");
-        let had_write = handle.take_write_dirty();
+        let had_write = self.state.handles.take_write_dirty_for_inode(handle.ino);
         let flushed_pending = self
             .state
             .writer
@@ -3443,6 +3661,57 @@ where
         if lock_type != FileLockType::UnLock {
             self.state.posix_lock_owners.insert((inode, owner), ());
         }
+    }
+
+    pub(crate) fn remember_fuse_lock_owner(
+        &self,
+        inode: i64,
+        fh: u64,
+        owner: i64,
+        lock_type: FileLockType,
+    ) {
+        if fh != 0 && lock_type != FileLockType::UnLock {
+            self.state
+                .fuse_lock_owners_by_handle
+                .insert((inode, fh, owner), ());
+        }
+    }
+
+    pub(crate) fn forget_fuse_lock_owner(&self, inode: i64, owner: i64) {
+        let keys: Vec<_> = self
+            .state
+            .fuse_lock_owners_by_handle
+            .iter()
+            .filter_map(|entry| {
+                let key = *entry.key();
+                (key.0 == inode && key.2 == owner).then_some(key)
+            })
+            .collect();
+
+        for key in keys {
+            self.state.fuse_lock_owners_by_handle.remove(&key);
+        }
+    }
+
+    pub(crate) fn take_fuse_lock_owners_for_handle(&self, inode: i64, fh: u64) -> Vec<i64> {
+        let keys: Vec<_> = self
+            .state
+            .fuse_lock_owners_by_handle
+            .iter()
+            .filter_map(|entry| {
+                let key = *entry.key();
+                (key.0 == inode && key.1 == fh).then_some(key)
+            })
+            .collect();
+
+        let mut owners = Vec::with_capacity(keys.len());
+        for key in keys {
+            if self.state.fuse_lock_owners_by_handle.remove(&key).is_some() {
+                self.state.posix_lock_owners.remove(&(inode, key.2));
+                owners.push(key.2);
+            }
+        }
+        owners
     }
 
     pub(crate) fn take_posix_lock_owner(&self, inode: i64, owner: i64) -> bool {

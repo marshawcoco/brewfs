@@ -16,6 +16,18 @@ fn env_flag_enabled(name: &str) -> bool {
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .map(|value| match value.as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
 #[derive(Clone)]
 pub struct ReadConfig {
     pub layout: ChunkLayout,
@@ -87,6 +99,12 @@ pub struct WriteConfig {
     pub writeback_recent_pending_soft_limit: u64,
     /// Hard limit for committed-but-not-uploaded dirty bytes. 0 falls back to the soft limit.
     pub writeback_recent_pending_hard_limit: u64,
+    /// Require local writeback stage to be sealed before publishing metadata.
+    pub writeback_require_stage_before_commit: bool,
+    /// Allow upload-before-commit writers to publish uploaded full-block
+    /// prefixes before a writable partial tail is closed. Disabled by default
+    /// because build tools rely on close-to-open artifact publication.
+    pub upload_before_commit_prefix_split: bool,
 }
 
 impl Default for WriteConfig {
@@ -137,6 +155,14 @@ impl Default for WriteConfig {
             cached_block_assembler: env_flag_enabled("BREWFS_CACHED_BLOCK_ASSEMBLER"),
             writeback_recent_pending_soft_limit,
             writeback_recent_pending_hard_limit,
+            writeback_require_stage_before_commit: env_bool(
+                "BREWFS_WRITEBACK_REQUIRE_STAGE_BEFORE_COMMIT",
+                true,
+            ),
+            upload_before_commit_prefix_split: env_bool(
+                "BREWFS_UPLOAD_BEFORE_COMMIT_PREFIX_SPLIT",
+                false,
+            ),
         }
     }
 }
@@ -216,6 +242,20 @@ impl WriteConfig {
             ..self
         }
     }
+
+    pub fn writeback_require_stage_before_commit(self, require: bool) -> Self {
+        Self {
+            writeback_require_stage_before_commit: require,
+            ..self
+        }
+    }
+
+    pub fn upload_before_commit_prefix_split(self, enabled: bool) -> Self {
+        Self {
+            upload_before_commit_prefix_split: enabled,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -267,7 +307,8 @@ impl VFSConfig {
                 .upload_concurrency(cache.upload_concurrency)
                 .writeback_mode(cache.writeback_mode)
                 .writeback_recent_pending_soft_limit(cache.writeback_recent_pending_soft_bytes)
-                .writeback_recent_pending_hard_limit(cache.writeback_recent_pending_hard_bytes),
+                .writeback_recent_pending_hard_limit(cache.writeback_recent_pending_hard_bytes)
+                .writeback_require_stage_before_commit(cache.writeback_require_stage_before_commit),
         );
 
         Self { read, write, cache }
@@ -335,6 +376,7 @@ mod tests {
             writeback_mode: WriteBackMode::CommitBeforeUpload,
             writeback_recent_pending_soft_bytes: 123,
             writeback_recent_pending_hard_bytes: 456,
+            writeback_require_stage_before_commit: false,
             ..CacheConfig::default()
         };
 
@@ -348,6 +390,7 @@ mod tests {
         assert_eq!(config.write.upload_concurrency, cache.upload_concurrency);
         assert_eq!(config.write.writeback_recent_pending_soft_limit, 123);
         assert_eq!(config.write.writeback_recent_pending_hard_limit, 456);
+        assert!(!config.write.writeback_require_stage_before_commit);
         assert_eq!(
             config.write.auto_flush_max_age,
             Duration::from_millis(cache.dirty_slice_max_age_ms)
@@ -372,15 +415,21 @@ mod tests {
             let default_config = WriteConfig::new(ChunkLayout::default());
             assert_eq!(default_config.writeback_recent_pending_soft_limit, 0);
             assert_eq!(default_config.writeback_recent_pending_hard_limit, 0);
+            assert!(default_config.writeback_require_stage_before_commit);
+            assert!(!default_config.upload_before_commit_prefix_split);
             assert!(!default_config.cached_block_assembler);
         });
 
         let configured = WriteConfig::new(ChunkLayout::default())
             .writeback_recent_pending_soft_limit(123)
             .writeback_recent_pending_hard_limit(456)
+            .writeback_require_stage_before_commit(false)
+            .upload_before_commit_prefix_split(true)
             .cached_block_assembler(true);
         assert_eq!(configured.writeback_recent_pending_soft_limit, 123);
         assert_eq!(configured.writeback_recent_pending_hard_limit, 456);
+        assert!(!configured.writeback_require_stage_before_commit);
+        assert!(configured.upload_before_commit_prefix_split);
         assert!(configured.cached_block_assembler);
     }
 

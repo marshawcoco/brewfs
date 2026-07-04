@@ -28,8 +28,10 @@ fn default_mount_options() -> MountOptions {
     let mut mo = MountOptions::default();
     mo.fs_name("brewfs");
     mo.default_permissions(true);
-    // BrewFS userspace writeback currently coalesces large writes more predictably without
-    // kernel writeback-cache. Keep the kernel mode opt-in for workloads that need it.
+    // Keep the kernel writeback-cache opt-in.  It can help mmap-heavy
+    // single-client workloads, but Linux can zero already-written mmap bytes
+    // around byte-granular fallocate extension (xfstests generic/438), so the
+    // correctness default is the write-through FUSE page-cache path.
     mo.write_back(fuse_writeback_enabled());
     // Allow other users to access the filesystem (required for multi-user scenarios and xfstests)
     // Note: Requires 'user_allow_other' in /etc/fuse.conf for non-root mounts
@@ -203,10 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn fuse_writeback_cache_is_opt_in() {
+    fn fuse_writeback_cache_defaults_off_and_can_be_enabled() {
         assert!(!parse_fuse_writeback_enabled(None));
         assert!(parse_fuse_writeback_enabled(Some("1".to_string())));
         assert!(parse_fuse_writeback_enabled(Some("true".to_string())));
+        assert!(parse_fuse_writeback_enabled(Some("yes".to_string())));
+        assert!(parse_fuse_writeback_enabled(Some("on".to_string())));
         assert!(!parse_fuse_writeback_enabled(Some("0".to_string())));
+        assert!(!parse_fuse_writeback_enabled(Some("false".to_string())));
+        assert!(!parse_fuse_writeback_enabled(Some("maybe".to_string())));
     }
 }

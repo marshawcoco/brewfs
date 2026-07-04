@@ -79,6 +79,7 @@ pub struct CacheConfig {
     // Disk safety
     pub min_free_disk_bytes: u64,
     pub writeback_persist_sync: bool,
+    pub writeback_require_stage_before_commit: bool,
 
     // Compression
     pub compression: Compression,
@@ -115,6 +116,7 @@ impl Default for CacheConfig {
             writeback_recent_pending_hard_bytes: 0,
             min_free_disk_bytes: 1024 * 1024 * 1024,
             writeback_persist_sync: true,
+            writeback_require_stage_before_commit: true,
             compression: Compression::Lz4,
             verify_cache_checksum: CacheIntegrityMode::Full,
             bandwidth: BandwidthConfig::default(),
@@ -152,5 +154,6 @@ mod tests {
         assert!(config.populate_write_cache_after_upload);
         assert!(!config.persist_write_cache_after_upload);
         assert!(config.writeback_persist_sync);
+        assert!(config.writeback_require_stage_before_commit);
     }
 }

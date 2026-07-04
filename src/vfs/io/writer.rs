@@ -32,7 +32,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use rand::RngCore;
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Display;
+use std::fmt::{Display, Write as FmtWrite};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Weak};
@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
-use tracing::{Instrument, warn};
+use tracing::{Instrument, info, warn};
 
 const FLUSH_DURATION: Duration = Duration::from_secs(5);
 const COMMIT_WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -97,6 +97,11 @@ static CACHED_SUB_BLOCK_TOO_MANY_MIN_AGE_CONFIG: LazyLock<Duration> = LazyLock::
         "BREWFS_CACHED_SUB_BLOCK_TOO_MANY_MIN_AGE_MS",
         CACHED_SUB_BLOCK_TOO_MANY_MIN_AGE,
     )
+});
+static DEBUG_CACHED_WRITE_OFFSET: LazyLock<Option<u64>> = LazyLock::new(|| {
+    std::env::var("BREWFS_DEBUG_CACHED_WRITE_OFFSET")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
 });
 
 fn env_duration_ms(name: &str, default: Duration) -> Duration {
@@ -491,6 +496,37 @@ impl SliceState {
         }
     }
 
+    fn data_range(&self) -> Option<(u64, u64)> {
+        let len = self.data.len();
+        if len == 0 {
+            return None;
+        }
+
+        Some((self.offset, self.offset + len))
+    }
+
+    fn can_coalesce_cached_writable(&self) -> bool {
+        matches!(self.state, SliceStatus::Writable)
+            && self.slice_id.is_none()
+            && self.uploaded == 0
+            && self.dispatched_end == 0
+            && self.block_done == 0
+            && self.in_flight == 0
+            && !self.upload_task_active
+            && !self.recent_pending_accounted
+            && self.writeback_persisted_bytes == 0
+            && !self.writeback_record_sealing
+            && !self.writeback_record_sealed
+            && self.err.is_none()
+            && self.frozen_epoch == 0
+            && !self.meta_write_started
+            && self.freeze_reason.is_none()
+            && self.auto_freeze_trigger.is_none()
+            && self.data.len() > 0
+            && self.data.contiguous_written_len() == self.data.len()
+            && matches!(self.write_origin_kind(), WriteOriginKind::CachedOnly)
+    }
+
     fn write_range_has_written_overlap(&self, offset: u64, len: usize) -> bool {
         if offset < self.offset {
             return false;
@@ -573,6 +609,13 @@ pub(crate) struct ChunkState {
     /// still serve their data after commit_chunk marks them Committed.
     recently_committed: VecDeque<Arc<ParkingMutex<SliceState>>>,
     commit_started: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CachedCoalesceCandidate {
+    index: usize,
+    start: u64,
+    end: u64,
 }
 
 impl ChunkState {
@@ -1086,6 +1129,7 @@ where
                 .await
             {
                 Ok(()) => {
+                    self.shared.inode.set_committed_size(new_size);
                     self.shared
                         .inode
                         .add_estimated_allocated_bytes(desc.length.as_usize() as u64);
@@ -1961,6 +2005,8 @@ where
                 flush_waiting: 0,
                 write_waiting: 0,
                 chunks: BTreeMap::default(),
+                cached_write_watermarks: BTreeMap::default(),
+                sparse_fallocate_ranges: BTreeMap::default(),
             }),
             write_notify: Notify::new(),
             flush_notify: Notify::new(),
@@ -2002,6 +2048,8 @@ struct Inner {
     flush_waiting: u16,
     write_waiting: u16,
     chunks: BTreeMap<u64, ChunkState>,
+    cached_write_watermarks: BTreeMap<u64, Vec<CachedWriteRange>>,
+    sparse_fallocate_ranges: BTreeMap<u64, Vec<(u64, u64)>>,
 }
 
 impl Inner {
@@ -2029,6 +2077,79 @@ impl Inner {
         cid
     }
 
+    fn allowed_cached_write_ranges(
+        &mut self,
+        chunk_id: u64,
+        offset: u64,
+        len: usize,
+        creation_unique: u64,
+    ) -> Vec<(u64, usize)> {
+        if len == 0 {
+            return Vec::new();
+        }
+        if creation_unique == 0 {
+            return vec![(offset, len)];
+        }
+
+        let end = offset + len as u64;
+        let ranges = self.cached_write_watermarks.entry(chunk_id).or_default();
+        let mut allowed = crate::utils::Intervals::new(offset, end);
+        for range in ranges.iter() {
+            if range.max_unique > creation_unique {
+                allowed.cut(range.start.max(offset), range.end.min(end));
+            }
+        }
+        let allowed = allowed
+            .collect()
+            .into_iter()
+            .map(|(start, end)| (start, (end - start).as_usize()))
+            .collect();
+
+        record_cached_write_watermark(ranges, offset, end, creation_unique);
+        allowed
+    }
+
+    fn record_sparse_fallocate_range(&mut self, chunk_id: u64, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        let ranges = self.sparse_fallocate_ranges.entry(chunk_id).or_default();
+        ranges.push((start, end));
+        ranges.sort_unstable_by_key(|range| (range.0, range.1));
+
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges.drain(..) {
+            if start >= end {
+                continue;
+            }
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+                continue;
+            }
+            merged.push((start, end));
+        }
+        *ranges = merged;
+    }
+
+    fn sparse_fallocate_subranges(&self, chunk_id: u64, start: u64, len: usize) -> Vec<(u64, u64)> {
+        let end = start.saturating_add(len as u64);
+        self.sparse_fallocate_ranges
+            .get(&chunk_id)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .filter_map(|&(range_start, range_end)| {
+                        let overlap_start = range_start.max(start);
+                        let overlap_end = range_end.min(end);
+                        (overlap_start < overlap_end).then_some((overlap_start, overlap_end))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn chunk_ids(&self) -> Vec<u64> {
         self.chunks.keys().copied().collect()
     }
@@ -2036,6 +2157,166 @@ impl Inner {
     fn has_chunks(&self) -> bool {
         !self.chunks.is_empty()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CachedWriteRange {
+    start: u64,
+    end: u64,
+    max_unique: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CachedWriteSegment {
+    file_offset: u64,
+    buf_offset: usize,
+    len: usize,
+}
+
+fn debug_cached_write_offset() -> Option<u64> {
+    *DEBUG_CACHED_WRITE_OFFSET
+}
+
+fn cached_write_probe_index(offset: u64, len: usize, probe: u64) -> Option<usize> {
+    let end = offset.checked_add(len as u64)?;
+    (offset <= probe && probe < end).then_some((probe - offset).as_usize())
+}
+
+fn cached_write_probe_segments(
+    segments: &[CachedWriteSegment],
+    probe: u64,
+) -> Vec<CachedWriteSegment> {
+    segments
+        .iter()
+        .copied()
+        .filter(|segment| {
+            segment.file_offset <= probe && probe < segment.file_offset + segment.len as u64
+        })
+        .collect()
+}
+
+fn cached_write_debug_window(buf: &[u8], index: usize) -> String {
+    let start = index.saturating_sub(16);
+    let end = (index + 17).min(buf.len());
+    let mut out = String::new();
+    for (pos, byte) in buf[start..end].iter().enumerate() {
+        if pos > 0 {
+            out.push(' ');
+        }
+        if start + pos == index {
+            out.push('[');
+            let _ = write!(&mut out, "{byte:02x}");
+            out.push(']');
+        } else {
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+    }
+    out
+}
+
+fn push_nonzero_cached_segments(
+    out: &mut Vec<CachedWriteSegment>,
+    file_offset: u64,
+    buf_offset: usize,
+    buf: &[u8],
+) {
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        while pos < buf.len() && buf[pos] == 0 {
+            pos += 1;
+        }
+        let start = pos;
+        while pos < buf.len() && buf[pos] != 0 {
+            pos += 1;
+        }
+        if start < pos {
+            out.push(CachedWriteSegment {
+                file_offset: file_offset + start as u64,
+                buf_offset: buf_offset + start,
+                len: pos - start,
+            });
+        }
+    }
+}
+
+fn record_cached_write_watermark(
+    ranges: &mut Vec<CachedWriteRange>,
+    start: u64,
+    end: u64,
+    unique: u64,
+) {
+    if unique == 0 || start >= end {
+        return;
+    }
+
+    let mut boundaries = vec![start, end];
+    for range in ranges.iter() {
+        if range.end <= start || range.start >= end {
+            continue;
+        }
+        boundaries.push(range.start.max(start));
+        boundaries.push(range.end.min(end));
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut next = Vec::with_capacity(ranges.len() + boundaries.len());
+    for range in ranges.iter().copied() {
+        if range.end <= start || range.start >= end {
+            next.push(range);
+            continue;
+        }
+        if range.start < start {
+            next.push(CachedWriteRange {
+                start: range.start,
+                end: start,
+                max_unique: range.max_unique,
+            });
+        }
+        if range.end > end {
+            next.push(CachedWriteRange {
+                start: end,
+                end: range.end,
+                max_unique: range.max_unique,
+            });
+        }
+    }
+
+    for window in boundaries.windows(2) {
+        let seg_start = window[0];
+        let seg_end = window[1];
+        if seg_start >= seg_end {
+            continue;
+        }
+        let mut max_unique = unique;
+        for range in ranges.iter() {
+            if range.start < seg_end && seg_start < range.end {
+                max_unique = max_unique.max(range.max_unique);
+            }
+        }
+        next.push(CachedWriteRange {
+            start: seg_start,
+            end: seg_end,
+            max_unique,
+        });
+    }
+
+    next.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<CachedWriteRange> = Vec::with_capacity(next.len());
+    for range in next {
+        if range.start >= range.end {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && last.end == range.start
+            && last.max_unique == range.max_unique
+        {
+            last.end = range.end;
+            continue;
+        }
+        merged.push(range);
+    }
+    *ranges = merged;
 }
 
 pub(crate) struct FileWriter<B, M> {
@@ -2276,8 +2557,213 @@ where
         buf: &[u8],
         creation_unique: u64,
     ) -> anyhow::Result<usize> {
-        self.write_at_inner(offset, buf, true, creation_unique, WriteOrigin::Cached)
-            .await
+        let debug_probe = debug_cached_write_offset();
+        if let Some(probe) = debug_probe
+            && let Some(index) = cached_write_probe_index(offset, buf.len(), probe)
+        {
+            info!(
+                probe,
+                write_offset = offset,
+                write_len = buf.len(),
+                creation_unique,
+                value = buf[index],
+                window = %cached_write_debug_window(buf, index),
+                "cached_write_probe_input"
+            );
+        }
+
+        let ranges = self
+            .allowed_cached_write_ranges(offset, buf.len(), creation_unique)
+            .await?;
+        if let Some(probe) = debug_probe
+            && cached_write_probe_index(offset, buf.len(), probe).is_some()
+        {
+            info!(
+                probe,
+                write_offset = offset,
+                write_len = buf.len(),
+                creation_unique,
+                probe_segments = ?cached_write_probe_segments(&ranges, probe),
+                all_segments = ?ranges,
+                "cached_write_probe_allowed"
+            );
+        }
+        let ranges = self
+            .filter_sparse_fallocate_zero_segments(ranges, buf)
+            .await?;
+        if let Some(probe) = debug_probe
+            && cached_write_probe_index(offset, buf.len(), probe).is_some()
+        {
+            info!(
+                probe,
+                write_offset = offset,
+                write_len = buf.len(),
+                creation_unique,
+                probe_segments = ?cached_write_probe_segments(&ranges, probe),
+                all_segments = ?ranges,
+                "cached_write_probe_filtered"
+            );
+        }
+        for range in ranges {
+            self.write_at_inner(
+                range.file_offset,
+                &buf[range.buf_offset..range.buf_offset + range.len],
+                true,
+                creation_unique,
+                WriteOrigin::Cached,
+            )
+            .await?;
+        }
+        Ok(buf.len())
+    }
+
+    pub(crate) async fn record_sparse_fallocate(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> anyhow::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let layout = self.shared.config.layout;
+        let spans = split_chunk_spans(layout, offset, len.as_usize());
+        let span_cids: Vec<_> = spans
+            .iter()
+            .map(|span| chunk_id_for(self.shared.inode.ino(), span.index))
+            .collect::<std::io::Result<Vec<_>>>()?;
+
+        let mut guard = self.shared.inner.lock().await;
+        for (span, chunk_id) in spans.iter().zip(span_cids.iter()) {
+            if let Some(probe) = debug_cached_write_offset() {
+                let file_start = span.index * layout.chunk_size + span.offset;
+                let file_end = file_start + span.len;
+                if file_start <= probe && probe < file_end {
+                    info!(
+                        probe,
+                        file_start,
+                        file_end,
+                        chunk_id,
+                        chunk_offset_start = span.offset,
+                        chunk_offset_end = span.offset + span.len,
+                        "sparse_fallocate_probe_record"
+                    );
+                }
+            }
+            guard.record_sparse_fallocate_range(*chunk_id, span.offset, span.offset + span.len);
+        }
+        Ok(())
+    }
+
+    async fn allowed_cached_write_ranges(
+        &self,
+        offset: u64,
+        len: usize,
+        creation_unique: u64,
+    ) -> anyhow::Result<Vec<CachedWriteSegment>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if creation_unique == 0 {
+            return Ok(vec![CachedWriteSegment {
+                file_offset: offset,
+                buf_offset: 0,
+                len,
+            }]);
+        }
+
+        let layout = self.shared.config.layout;
+        let spans = split_chunk_spans(layout, offset, len);
+        let span_cids: Vec<_> = spans
+            .iter()
+            .map(|span| chunk_id_for(self.shared.inode.ino(), span.index))
+            .collect::<std::io::Result<Vec<_>>>()?;
+
+        let mut guard = self.shared.inner.lock().await;
+        let mut segments = Vec::new();
+        let mut buf_offset = 0usize;
+        for (span, chunk_id) in spans.iter().zip(span_cids.iter()) {
+            let span_len = span.len.as_usize();
+            for (allowed_offset, allowed_len) in
+                guard.allowed_cached_write_ranges(*chunk_id, span.offset, span_len, creation_unique)
+            {
+                segments.push(CachedWriteSegment {
+                    file_offset: span.index * layout.chunk_size + allowed_offset,
+                    buf_offset: buf_offset + (allowed_offset - span.offset).as_usize(),
+                    len: allowed_len,
+                });
+            }
+            buf_offset += span_len;
+        }
+        Ok(segments)
+    }
+
+    async fn filter_sparse_fallocate_zero_segments(
+        &self,
+        segments: Vec<CachedWriteSegment>,
+        buf: &[u8],
+    ) -> anyhow::Result<Vec<CachedWriteSegment>> {
+        if segments.is_empty() {
+            return Ok(segments);
+        }
+
+        let layout = self.shared.config.layout;
+        let mut out = Vec::with_capacity(segments.len());
+        let guard = self.shared.inner.lock().await;
+
+        for segment in segments {
+            let spans = split_chunk_spans(layout, segment.file_offset, segment.len);
+            let mut span_buf_offset = segment.buf_offset;
+            for span in spans {
+                let chunk_id = chunk_id_for(self.shared.inode.ino(), span.index)?;
+                let span_len = span.len.as_usize();
+                let span_end = span.offset + span.len;
+                let sparse_ranges =
+                    guard.sparse_fallocate_subranges(chunk_id, span.offset, span_len);
+                if sparse_ranges.is_empty() {
+                    out.push(CachedWriteSegment {
+                        file_offset: span.index * layout.chunk_size + span.offset,
+                        buf_offset: span_buf_offset,
+                        len: span_len,
+                    });
+                    span_buf_offset += span_len;
+                    continue;
+                }
+
+                let mut cursor = span.offset;
+                for (sparse_start, sparse_end) in sparse_ranges {
+                    if cursor < sparse_start {
+                        out.push(CachedWriteSegment {
+                            file_offset: span.index * layout.chunk_size + cursor,
+                            buf_offset: span_buf_offset + (cursor - span.offset).as_usize(),
+                            len: (sparse_start - cursor).as_usize(),
+                        });
+                    }
+
+                    let sparse_buf_offset =
+                        span_buf_offset + (sparse_start - span.offset).as_usize();
+                    push_nonzero_cached_segments(
+                        &mut out,
+                        span.index * layout.chunk_size + sparse_start,
+                        sparse_buf_offset,
+                        &buf[sparse_buf_offset
+                            ..sparse_buf_offset + (sparse_end - sparse_start).as_usize()],
+                    );
+                    cursor = sparse_end;
+                }
+
+                if cursor < span_end {
+                    out.push(CachedWriteSegment {
+                        file_offset: span.index * layout.chunk_size + cursor,
+                        buf_offset: span_buf_offset + (cursor - span.offset).as_usize(),
+                        len: (span_end - cursor).as_usize(),
+                    });
+                }
+                span_buf_offset += span_len;
+            }
+        }
+
+        Ok(out)
     }
 
     async fn write_at_inner(
@@ -2361,9 +2847,11 @@ where
             }
         }
 
-        let new_len = offset + buf.len() as u64;
-        if new_len > self.shared.inode.file_size() {
-            self.shared.inode.extend_size(new_len);
+        if matches!(origin, WriteOrigin::Normal) {
+            let new_len = offset + buf.len() as u64;
+            if new_len > self.shared.inode.file_size() {
+                self.shared.inode.extend_size(new_len);
+            }
         }
         self.shared.write_gen.fetch_add(1, Ordering::Release);
         Ok(buf.len())
@@ -2499,6 +2987,219 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    async fn coalesce_cached_slices_before_explicit_flush(&self) -> anyhow::Result<()> {
+        let mut guard = self.shared.inner.lock().await;
+        for chunk in guard.chunks.values_mut() {
+            while Self::coalesce_one_cached_slice_run(&self.shared, chunk)? {}
+        }
+        Ok(())
+    }
+
+    fn coalesce_one_cached_slice_run(
+        shared: &Arc<Shared<B, M>>,
+        chunk: &mut ChunkState,
+    ) -> anyhow::Result<bool> {
+        let Some(indices) =
+            Self::find_cached_coalesce_run(&chunk.slices, shared.config.cached_block_assembler)
+        else {
+            return Ok(false);
+        };
+        let run_slices = indices
+            .iter()
+            .filter_map(|idx| chunk.slices.get(*idx).cloned())
+            .collect::<Vec<_>>();
+        if run_slices.len() < 2 {
+            return Ok(false);
+        }
+
+        let merged = Self::build_coalesced_cached_slice(shared, chunk.chunk_id, &run_slices)?;
+        chunk
+            .slices
+            .retain(|slice| !run_slices.iter().any(|old| Arc::ptr_eq(slice, old)));
+
+        let creation_unique = merged.lock().creation_unique;
+        let insert_pos = if creation_unique == 0 {
+            chunk.slices.len()
+        } else {
+            chunk
+                .slices
+                .iter()
+                .position(|slice| slice.lock().creation_unique > creation_unique)
+                .unwrap_or(chunk.slices.len())
+        };
+        chunk.slices.insert(insert_pos, merged);
+        Ok(true)
+    }
+
+    fn find_cached_coalesce_run(
+        slices: &VecDeque<Arc<ParkingMutex<SliceState>>>,
+        allow_overlap: bool,
+    ) -> Option<Vec<usize>> {
+        if slices.len() < 2 {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+        for (index, slice) in slices.iter().enumerate() {
+            let state = slice.lock();
+            if !state.can_coalesce_cached_writable() {
+                continue;
+            }
+            let (start, end) = state.data_range()?;
+            candidates.push(CachedCoalesceCandidate { index, start, end });
+        }
+        candidates.sort_by_key(|candidate| (candidate.start, candidate.end, candidate.index));
+
+        let mut run: Vec<CachedCoalesceCandidate> = Vec::new();
+        let mut run_end = 0;
+        for candidate in candidates {
+            if !run.is_empty() {
+                let extends_current_run = if allow_overlap {
+                    candidate.start <= run_end
+                } else {
+                    candidate.start == run_end
+                };
+                if extends_current_run {
+                    run_end = run_end.max(candidate.end);
+                    run.push(candidate);
+                    continue;
+                }
+
+                if let Some(indices) = Self::valid_cached_coalesce_indices(slices, &run) {
+                    return Some(indices);
+                }
+                run.clear();
+            }
+            run_end = candidate.end;
+            run.push(candidate);
+        }
+
+        Self::valid_cached_coalesce_indices(slices, &run)
+    }
+
+    fn valid_cached_coalesce_indices(
+        slices: &VecDeque<Arc<ParkingMutex<SliceState>>>,
+        run: &[CachedCoalesceCandidate],
+    ) -> Option<Vec<usize>> {
+        if run.len() < 2 {
+            return None;
+        }
+
+        let run_start = run.first()?.start;
+        let run_end = run.iter().map(|candidate| candidate.end).max()?;
+        if Self::cached_coalesce_run_has_external_overlap(slices, run, run_start, run_end) {
+            return None;
+        }
+
+        Some(run.iter().map(|candidate| candidate.index).collect())
+    }
+
+    fn cached_coalesce_run_has_external_overlap(
+        slices: &VecDeque<Arc<ParkingMutex<SliceState>>>,
+        run: &[CachedCoalesceCandidate],
+        run_start: u64,
+        run_end: u64,
+    ) -> bool {
+        for (index, slice) in slices.iter().enumerate() {
+            if run.iter().any(|candidate| candidate.index == index) {
+                continue;
+            }
+
+            let state = slice.lock();
+            let Some((start, end)) = state.data_range() else {
+                continue;
+            };
+            if start < run_end && run_start < end {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn build_coalesced_cached_slice(
+        shared: &Arc<Shared<B, M>>,
+        chunk_id: u64,
+        run_slices: &[Arc<ParkingMutex<SliceState>>],
+    ) -> anyhow::Result<Arc<ParkingMutex<SliceState>>> {
+        struct CachedPiece {
+            offset: u64,
+            creation_unique: u64,
+            max_write_unique: u64,
+            write_origin_mask: u8,
+            data: Vec<u8>,
+            order: usize,
+        }
+
+        let mut pieces = Vec::with_capacity(run_slices.len());
+        for (order, slice) in run_slices.iter().enumerate() {
+            let state = slice.lock();
+            anyhow::ensure!(
+                state.can_coalesce_cached_writable(),
+                "cached slice changed while preparing coalesce"
+            );
+            let len = state.data.len().as_usize();
+            let mut data = vec![0; len];
+            let copied = state.data.copy_into(0, &mut data)?;
+            anyhow::ensure!(
+                copied == len,
+                "cached slice copy length mismatch while preparing coalesce"
+            );
+            pieces.push(CachedPiece {
+                offset: state.offset,
+                creation_unique: state.creation_unique,
+                max_write_unique: state.max_write_unique,
+                write_origin_mask: state.write_origin_mask,
+                data,
+                order,
+            });
+        }
+
+        let Some(run_start) = pieces.iter().map(|piece| piece.offset).min() else {
+            return Err(anyhow::anyhow!("cannot coalesce empty cached slice run"));
+        };
+        let run_end = pieces
+            .iter()
+            .map(|piece| piece.offset.saturating_add(piece.data.len() as u64))
+            .max()
+            .unwrap_or(run_start);
+
+        let merged_len = (run_end - run_start).as_usize();
+        let mut merged_data = vec![0; merged_len];
+        let mut creation_unique = u64::MAX;
+        let mut max_write_unique = 0;
+        let mut write_origin_mask = 0u8;
+        pieces.sort_by_key(|piece| (piece.creation_unique, piece.order));
+        for piece in &pieces {
+            let start = (piece.offset - run_start).as_usize();
+            let end = start + piece.data.len();
+            merged_data[start..end].copy_from_slice(&piece.data);
+            if piece.creation_unique != 0 && piece.creation_unique < creation_unique {
+                creation_unique = piece.creation_unique;
+            }
+            max_write_unique = max_write_unique.max(piece.max_write_unique);
+            write_origin_mask |= piece.write_origin_mask;
+        }
+        if creation_unique == u64::MAX {
+            creation_unique = 0;
+        }
+
+        let mut merged = SliceState::new(
+            chunk_id,
+            run_start,
+            shared.config.clone(),
+            shared.buffer_usage.clone(),
+            shared.memory_budget.clone(),
+            creation_unique,
+        );
+        merged.data.append(&merged_data)?;
+        merged.max_write_unique = max_write_unique;
+        merged.write_origin_mask = write_origin_mask;
+        merged.update_usage(merged.data.alloc_bytes());
+
+        Ok(Arc::new(ParkingMutex::new(merged)))
     }
 
     // Flush: freeze all slices, upload them, and wait for those slices to commit.
@@ -2644,6 +3345,8 @@ where
         let result = {
             let mut flushed_gen = self.shared.write_gen.load(Ordering::Acquire);
             loop {
+                self.coalesce_cached_slices_before_explicit_flush().await?;
+
                 // Snapshot every slice that exists right now.
                 let slices: Vec<Arc<ParkingMutex<SliceState>>> = {
                     let guard = self.shared.inner.lock().await;
@@ -2817,6 +3520,8 @@ where
 
         let mut guard = self.shared.inner.lock().await;
         guard.chunks.clear();
+        guard.cached_write_watermarks.clear();
+        guard.sparse_fallocate_ranges.clear();
 
         if guard.flush_waiting > 0 {
             self.shared.flush_notify.notify_waiters();
@@ -3317,6 +4022,9 @@ where
         ) {
             return false;
         }
+        if !shared.config.upload_before_commit_prefix_split {
+            return false;
+        }
 
         let mut guard = shared.inner.lock().await;
         let Some(chunk) = guard.chunks.get_mut(&chunk_id) else {
@@ -3512,7 +4220,9 @@ where
 
         let stage_ready = {
             let s = slice.lock();
-            shared.write_back.is_none() || s.writeback_fully_persisted()
+            shared.write_back.is_none()
+                || !shared.config.writeback_require_stage_before_commit
+                || s.writeback_fully_persisted()
         };
         if !stage_ready {
             return false;
@@ -3904,6 +4614,7 @@ where
                             }
                         } else {
                             commit_failures = 0;
+                            shared.inode.set_committed_size(new_size);
 
                             // Track committed bytes on the inode for accurate st_blocks.
                             shared
@@ -5120,6 +5831,17 @@ mod tests {
         test_config_with_writeback(layout, WriteBackMode::UploadBeforeCommit)
     }
 
+    fn test_config_with_prefix_split(layout: ChunkLayout) -> Arc<WriteConfig> {
+        Arc::new(
+            WriteConfig::new(layout)
+                .page_size(4 * 1024)
+                .freeze_min_bytes(4096)
+                .auto_flush_max_age(Duration::from_millis(5))
+                .writeback_mode(WriteBackMode::UploadBeforeCommit)
+                .upload_before_commit_prefix_split(true),
+        )
+    }
+
     fn test_config_without_auto_flush(layout: ChunkLayout) -> Arc<WriteConfig> {
         // Keep live-slice assertions deterministic instead of racing auto_flush.
         test_config_with_writeback_and_auto_flush(
@@ -5725,6 +6447,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cached_write_does_not_extend_inode_size() {
+        let layout = ChunkLayout::default();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "cached_write_no_eof_extend.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = FileWriter::new(
+            inode.clone(),
+            test_config(layout),
+            backend,
+            reader,
+            Arc::new(AtomicU64::new(0)),
+            None,
+        );
+
+        writer.write_at_cached(0, &[7u8; 1024], 1).await.unwrap();
+        assert_eq!(inode.file_size(), 0);
+
+        writer.write_at(0, &[8u8; 1024]).await.unwrap();
+        assert_eq!(inode.file_size(), 1024);
+    }
+
+    #[tokio::test]
     async fn test_file_writer_appends_slices_for_overwrite() {
         let layout = ChunkLayout::default();
         let store = Arc::new(InMemoryBlockStore::new());
@@ -6008,6 +6762,51 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_upload_before_commit_does_not_publish_uploaded_prefix_by_default() {
+        let layout = ChunkLayout {
+            chunk_size: 16 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "uploaded_prefix_no_split.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = Arc::new(DataWriter::new(test_config(layout), backend, reader, None));
+        let file_writer = writer.ensure_file(inode.clone());
+        let block = layout.block_size as usize;
+
+        file_writer
+            .write_at_cached(0, &vec![1u8; block + 1024], 10)
+            .await
+            .unwrap();
+
+        sleep(Duration::from_millis(200)).await;
+        let cid = chunk_id_for(inode.ino(), 0).unwrap();
+        assert!(
+            meta.get_slices(cid).await.unwrap().is_empty(),
+            "uploaded full-block prefixes should not become visible before close/flush by default"
+        );
+
+        file_writer.flush().await.unwrap();
+        let slices = meta.get_slices(cid).await.unwrap();
+        assert!(
+            slices
+                .iter()
+                .any(|s| s.offset == 0 && s.length == (block + 1024) as u64),
+            "explicit flush should publish the complete slice"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_upload_before_commit_splits_uploaded_prefix_and_keeps_tail_writable() {
         let layout = ChunkLayout {
             chunk_size: 16 * 1024,
@@ -6027,13 +6826,14 @@ mod tests {
             backend.clone(),
         ));
         let writer = Arc::new(DataWriter::new(
-            test_config(layout),
+            test_config_with_prefix_split(layout),
             backend,
             reader.clone(),
             None,
         ));
         let file_writer = writer.ensure_file(inode.clone());
         let block = layout.block_size as usize;
+        inode.set_size((block * 2) as u64);
 
         file_writer
             .write_at_cached(0, &vec![1u8; block + 1024], 10)
@@ -6242,6 +7042,7 @@ mod tests {
         );
 
         let block = layout.block_size as usize;
+        inode.set_size((block * 3) as u64);
         writer
             .write_at_cached(0, &vec![0x11; block], 10)
             .await
@@ -6432,6 +7233,92 @@ mod tests {
         let slices = meta.get_slices(cid).await.unwrap();
         assert_eq!(slices.len(), 1);
         assert_eq!(slices[0].slice_id, 11);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_commit_before_upload_can_skip_stage_when_configured() {
+        let layout = ChunkLayout {
+            chunk_size: 8 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(BlockingStore::new(true));
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "stage_skip_commit.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        let write_back = Arc::new(
+            crate::vfs::cache::write_back::FsWriteBackCache::new_with_sync(
+                temp.path().to_path_buf(),
+                false,
+            ),
+        );
+        let config = Arc::new(
+            WriteConfig::new(layout)
+                .page_size(4 * 1024)
+                .freeze_min_bytes(4096)
+                .auto_flush_max_age(Duration::from_millis(5))
+                .writeback_mode(WriteBackMode::CommitBeforeUpload)
+                .writeback_require_stage_before_commit(false),
+        );
+        let writer = FileWriter::new(
+            inode.clone(),
+            config.clone(),
+            backend,
+            reader,
+            Arc::new(AtomicU64::new(0)),
+            Some(write_back),
+        );
+
+        let cid = chunk_id_for(inode.ino(), 0).unwrap();
+        let slice = Arc::new(ParkingMutex::new(SliceState::new(
+            cid,
+            0,
+            config,
+            Arc::new(AtomicU64::new(0)),
+            None,
+            1,
+        )));
+        {
+            let mut state = slice.lock();
+            state.data.append(&vec![31u8; 1024]).unwrap();
+            state.state = SliceStatus::Readonly;
+            state.slice_id = Some(31);
+            state.frozen_epoch = inode.data_epoch();
+            state.freeze_reason = Some(SliceFreezeReason::ExplicitFlush);
+        }
+
+        {
+            let mut guard = writer.shared.inner.lock().await;
+            let mut chunk = ChunkState::new(cid);
+            chunk.slices.push_back(slice.clone());
+            guard.chunks.insert(cid, chunk);
+        }
+
+        assert!(
+            FileWriter::try_commit_before_upload_if_front(&writer.shared, &slice).await,
+            "front slice should commit without waiting for local stage when configured"
+        );
+        assert!(matches!(slice.lock().state, SliceStatus::Committed));
+        assert_eq!(
+            writer
+                .shared
+                .recent_pending_upload
+                .commit_before_stage_ops
+                .load(Ordering::Relaxed),
+            1
+        );
+        let slices = meta.get_slices(cid).await.unwrap();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].slice_id, 31);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6906,6 +7793,180 @@ mod tests {
         assert_eq!(after_flush.upload_partial_tail_explicit_flush_ops, 1);
         assert_eq!(after_flush.upload_partial_tail_auto_ops, 0);
         assert_eq!(after_flush.upload_partial_tail_max_unflushed_ops, 0);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_flush_coalesces_adjacent_cached_slices() {
+        let layout = ChunkLayout {
+            chunk_size: 16 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "cached_flush_coalesce.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = Arc::new(DataWriter::new(
+            test_config_without_auto_flush(layout),
+            backend,
+            reader.clone(),
+            None,
+        ));
+        let file_writer = writer.ensure_file(inode.clone());
+        inode.set_size(2048);
+
+        file_writer
+            .write_at_cached(1024, &[2u8; 1024], 20)
+            .await
+            .unwrap();
+        file_writer
+            .write_at_cached(0, &[1u8; 1024], 10)
+            .await
+            .unwrap();
+
+        let before_flush = writer.dirty_breakdown().await;
+        assert_eq!(before_flush.live_slices, 2);
+        assert_eq!(before_flush.slice_create_ops, 2);
+        assert_eq!(before_flush.slice_reuse_ops, 0);
+
+        file_writer.flush().await.unwrap();
+
+        let after_flush = writer.dirty_breakdown().await;
+        assert_eq!(after_flush.flush_fragmentation_slices, 1);
+        assert_eq!(after_flush.flush_fragmentation_cached_sub_block_slices, 1);
+        assert_eq!(after_flush.freeze_explicit_flush_ops, 1);
+        assert_eq!(after_flush.upload_batch_ops, 1);
+        assert_eq!(after_flush.upload_partial_tail_explicit_flush_ops, 1);
+
+        let cid = chunk_id_for(inode.ino(), 0).unwrap();
+        let slices = meta.get_slices(cid).await.unwrap();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].offset, 0);
+        assert_eq!(slices[0].length, 2048);
+
+        let file_reader = reader.open_for_handle(inode, 1);
+        let out = file_reader.read(0, 2048).await.unwrap();
+        assert_eq!(&out[..1024], &[1u8; 1024]);
+        assert_eq!(&out[1024..], &[2u8; 1024]);
+    }
+
+    #[tokio::test]
+    async fn test_cached_unique_watermark_drops_late_older_overlap() {
+        let layout = ChunkLayout {
+            chunk_size: 16 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "cached_overlap_coalesce.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = Arc::new(DataWriter::new(
+            Arc::new(
+                WriteConfig::new(layout)
+                    .page_size(4 * 1024)
+                    .freeze_min_bytes(4096)
+                    .auto_flush_max_age(Duration::from_secs(60))
+                    .cached_block_assembler(true),
+            ),
+            backend,
+            reader.clone(),
+            None,
+        ));
+        let file_writer = writer.ensure_file(inode.clone());
+        inode.set_size(2048);
+
+        file_writer
+            .write_at_cached(0, &[2u8; 2048], 20)
+            .await
+            .unwrap();
+        file_writer
+            .write_at_cached(0, &[1u8; 1024], 10)
+            .await
+            .unwrap();
+
+        let before_flush = writer.dirty_breakdown().await;
+        assert_eq!(before_flush.live_slices, 1);
+        assert_eq!(before_flush.slice_create_ops, 1);
+        assert_eq!(before_flush.slice_reject_older_unique_ops, 0);
+
+        file_writer.flush().await.unwrap();
+
+        let after_flush = writer.dirty_breakdown().await;
+        assert_eq!(after_flush.freeze_explicit_flush_ops, 1);
+        assert_eq!(after_flush.upload_batch_ops, 1);
+
+        let cid = chunk_id_for(inode.ino(), 0).unwrap();
+        let slices = meta.get_slices(cid).await.unwrap();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].offset, 0);
+        assert_eq!(slices[0].length, 2048);
+
+        let file_reader = reader.open_for_handle(inode, 1);
+        let out = file_reader.read(0, 2048).await.unwrap();
+        assert_eq!(out, vec![2u8; 2048]);
+    }
+
+    #[tokio::test]
+    async fn test_late_older_cached_write_does_not_overwrite_newer_committed_page() {
+        let layout = ChunkLayout {
+            chunk_size: 16 * 1024,
+            block_size: 4 * 1024,
+        };
+        let store = Arc::new(InMemoryBlockStore::new());
+        let meta_handle = create_meta_store_from_url("sqlite::memory:").await.unwrap();
+        let meta = meta_handle.layer();
+        let backend = Arc::new(Backend::new(store, meta.clone()));
+        let ino = meta
+            .create_file(1, "late_cached_page.txt".to_string())
+            .await
+            .unwrap();
+        let inode = Inode::new(ino, 0);
+        let reader = Arc::new(DataReader::new(
+            Arc::new(ReadConfig::new(layout)),
+            backend.clone(),
+        ));
+        let writer = Arc::new(DataWriter::new(
+            test_config_without_auto_flush(layout),
+            backend,
+            reader.clone(),
+            None,
+        ));
+        let file_writer = writer.ensure_file(inode.clone());
+
+        let page = layout.block_size as usize;
+        inode.set_size(page as u64);
+        let newer = vec![0x78; page];
+        file_writer.write_at_cached(0, &newer, 20).await.unwrap();
+        file_writer.flush().await.unwrap();
+
+        let mut older = vec![0; page];
+        older[..page / 2].fill(0x78);
+        assert_eq!(
+            file_writer.write_at_cached(0, &older, 10).await.unwrap(),
+            page
+        );
+        file_writer.flush().await.unwrap();
+
+        let file_reader = reader.open_for_handle(inode, 42);
+        let out = file_reader.read(0, page).await.unwrap();
+        assert_eq!(out, newer);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

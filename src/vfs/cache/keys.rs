@@ -38,11 +38,47 @@ impl DirtySliceKey {
         self.local_seq / DIRTY_SLICE_BUCKET_SIZE
     }
 
-    fn file_stem(self) -> String {
+    pub(crate) fn file_stem(self) -> String {
         format!(
             "{}_{}_{}_{}",
             self.ino, self.chunk_id, self.local_seq, self.epoch
         )
+    }
+
+    pub(crate) fn sealed_slice_path(
+        &self,
+        root: &std::path::Path,
+        chunk_offset: u64,
+        length: u64,
+    ) -> std::path::PathBuf {
+        self.dir_path(root).join(format!(
+            "{}_{}_{}.sealed",
+            self.file_stem(),
+            chunk_offset,
+            length
+        ))
+    }
+
+    pub(crate) fn sealed_file_prefix(self) -> String {
+        format!("{}_", self.file_stem())
+    }
+
+    pub(crate) fn parse_sealed_file_name(name: &str) -> Option<(Self, u64, u64)> {
+        let stem = name.strip_suffix(".sealed")?;
+        let parts: Vec<&str> = stem.split('_').collect();
+        if parts.len() != 6 {
+            return None;
+        }
+        Some((
+            Self {
+                ino: parts[0].parse().ok()?,
+                chunk_id: parts[1].parse().ok()?,
+                local_seq: parts[2].parse().ok()?,
+                epoch: parts[3].parse().ok()?,
+            },
+            parts[4].parse().ok()?,
+            parts[5].parse().ok()?,
+        ))
     }
 
     pub fn dir_path(&self, root: &std::path::Path) -> std::path::PathBuf {
@@ -109,6 +145,26 @@ mod tests {
                 .join("2")
                 .join("42_42000000000_2048_0.meta")
         );
+    }
+
+    #[test]
+    fn dirty_slice_sealed_file_name_round_trips_record_fields() {
+        let root = Path::new("/cache-root");
+        let key = DirtySliceKey {
+            ino: 42,
+            chunk_id: 42_000_000_000,
+            local_seq: 2048,
+            epoch: 3,
+        };
+
+        let path = key.sealed_slice_path(root, 4096, 8192);
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        let (parsed_key, chunk_offset, length) =
+            DirtySliceKey::parse_sealed_file_name(file_name).unwrap();
+
+        assert_eq!(parsed_key, key);
+        assert_eq!(chunk_offset, 4096);
+        assert_eq!(length, 8192);
     }
 }
 

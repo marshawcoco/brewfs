@@ -227,7 +227,7 @@ def load_drain_metrics(artifact_dir: pathlib.Path) -> list[Metric]:
         tool = row.get("tool", "")
         if not tool:
             continue
-        parsed = parse_seconds(row.get("post_fio_drain_s"))
+        parsed = parse_seconds(row.get("post_write_drain_s") or row.get("post_fio_drain_s"))
         if parsed:
             seconds, timed_out = parsed
             metrics.append(Metric("drain", tool, "post_write_drain_s", seconds, "s"))
