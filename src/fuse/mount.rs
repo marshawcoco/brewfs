@@ -75,6 +75,86 @@ where
 }
 
 #[cfg(target_os = "linux")]
+fn decode_mountinfo_path(value: &str) -> std::path::PathBuf {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let mut octal = String::new();
+            for _ in 0..3 {
+                if let Some(digit) = chars.next() {
+                    octal.push(digit);
+                }
+            }
+            if octal.len() == 3
+                && octal.as_bytes().iter().all(|digit| digit.is_ascii_digit())
+                && let Ok(byte) = u8::from_str_radix(&octal, 8)
+            {
+                decoded.push(byte as char);
+                continue;
+            }
+            decoded.push('\\');
+            decoded.push_str(&octal);
+        } else {
+            decoded.push(ch);
+        }
+    }
+    std::path::PathBuf::from(decoded)
+}
+
+#[cfg(target_os = "linux")]
+fn current_mount_id(mount_point: &Path) -> std::io::Result<u64> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+    for line in mountinfo.lines() {
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
+        let mut fields = left.split_whitespace();
+        let Ok(mount_id) = fields.next().unwrap_or_default().parse::<u64>() else {
+            continue;
+        };
+        let _parent_id = fields.next();
+        let _major_minor = fields.next();
+        let _root = fields.next();
+        let Some(mountpoint) = fields.next().map(decode_mountinfo_path) else {
+            continue;
+        };
+        let mut super_fields = right.split_whitespace();
+        let Some(fs_type) = super_fields.next() else {
+            continue;
+        };
+        let Some(source) = super_fields.next() else {
+            continue;
+        };
+        if mountpoint == mount_point
+            && matches!(fs_type, "fuse" | "fuse.brewfs")
+            && source == "brewfs"
+        {
+            return Ok(mount_id);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "BrewFS mount is missing from /proc/self/mountinfo",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn bind_mount_identity<S, M>(fs: &VFS<S, M>) -> std::io::Result<()>
+where
+    S: BlockStore + Send + Sync + 'static,
+    M: MetaLayer + Send + Sync + 'static,
+{
+    let canonical = fs.fuse_mount_point().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "VFS mount point was not bound before mounting",
+        )
+    })?;
+    fs.set_fuse_mount_id(current_mount_id(canonical)?)
+}
+
+#[cfg(target_os = "linux")]
 fn fuse_op_log_enabled() -> bool {
     std::env::var("BREWFS_FUSE_OP_LOG")
         .map(|value| {
@@ -96,6 +176,8 @@ where
     M: MetaLayer + Send + Sync + 'static,
 {
     let mount_point = mount_point.as_ref();
+    fs.set_fuse_mount_point(mount_point)?;
+    let identity = fs.clone();
     // Prefer unprivileged mount on Linux (requires fusermount3 in PATH)
     if fuse_op_log_enabled() {
         configure_session(
@@ -104,6 +186,10 @@ where
         )
         .mount_with_unprivileged(LoggingFileSystem::new(fs), mount_point)
         .await
+        .and_then(|handle| {
+            bind_mount_identity(&identity)?;
+            Ok(handle)
+        })
     } else {
         configure_session(
             asyncfuse::raw::Session::new(default_mount_options()),
@@ -111,6 +197,10 @@ where
         )
         .mount_with_unprivileged(fs, mount_point)
         .await
+        .and_then(|handle| {
+            bind_mount_identity(&identity)?;
+            Ok(handle)
+        })
     }
 }
 
@@ -127,6 +217,8 @@ where
     M: MetaLayer + Send + Sync + 'static,
 {
     let mount_point = mount_point.as_ref();
+    fs.set_fuse_mount_point(mount_point)?;
+    let identity = fs.clone();
     if fuse_op_log_enabled() {
         configure_session(
             asyncfuse::raw::Session::new(default_mount_options()),
@@ -134,6 +226,10 @@ where
         )
         .mount(LoggingFileSystem::new(fs), mount_point)
         .await
+        .and_then(|handle| {
+            bind_mount_identity(&identity)?;
+            Ok(handle)
+        })
     } else {
         configure_session(
             asyncfuse::raw::Session::new(default_mount_options()),
@@ -141,6 +237,10 @@ where
         )
         .mount(fs, mount_point)
         .await
+        .and_then(|handle| {
+            bind_mount_identity(&identity)?;
+            Ok(handle)
+        })
     }
 }
 
@@ -214,5 +314,14 @@ mod tests {
         assert!(!parse_fuse_writeback_enabled(Some("0".to_string())));
         assert!(!parse_fuse_writeback_enabled(Some("false".to_string())));
         assert!(!parse_fuse_writeback_enabled(Some("maybe".to_string())));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_path_decoder_handles_kernel_escapes() {
+        assert_eq!(
+            decode_mountinfo_path(r"/tmp/brew\040fs\011root"),
+            std::path::PathBuf::from("/tmp/brew fs\troot")
+        );
     }
 }

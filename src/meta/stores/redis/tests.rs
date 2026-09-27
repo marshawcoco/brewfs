@@ -20,6 +20,49 @@ use tokio::time::{self, Duration};
 use uuid::Uuid;
 
 #[test]
+fn update_node_ctime_preserves_exact_json_fields() {
+    let raw = br#"{
+        "ino": 7,
+        "name": "x\"attr\": {\"ctime\": 1}",
+        "unknown": {"value": "preserve me"},
+        "attr": {
+            "atime": 1700000000123456789,
+            "mtime": 1700000100987654321,
+            "ctime": 1700000000000000000,
+            "future_counter": 9007199254740993,
+            "future": {"attr": {"ctime": 2}}
+        }
+    }"#;
+    let before: serde_json::Value = serde_json::from_slice(raw).unwrap();
+    let updated = super::update_node_ctime(raw, 1800000000123456789).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&updated).unwrap();
+
+    assert_eq!(after["ino"], before["ino"]);
+    assert_eq!(after["name"], before["name"]);
+    assert_eq!(after["unknown"], before["unknown"]);
+    assert_eq!(after["attr"]["atime"], before["attr"]["atime"]);
+    assert_eq!(after["attr"]["mtime"], before["attr"]["mtime"]);
+    assert_eq!(after["attr"]["future_counter"], before["attr"]["future_counter"]);
+    assert_eq!(after["attr"]["future"], before["attr"]["future"]);
+    assert_eq!(
+        after["attr"]["ctime"],
+        serde_json::json!(1800000000123456789i64)
+    );
+}
+
+#[test]
+fn update_node_ctime_rejects_malformed_nodes() {
+    for raw in [
+        br#"not json"#.as_slice(),
+        br#"{}"#.as_slice(),
+        br#"{"attr":{}}"#.as_slice(),
+        br#"{"attr":"not an object"}"#.as_slice(),
+    ] {
+        assert!(super::update_node_ctime(raw, 1).is_err());
+    }
+}
+
+#[test]
 fn local_txlock_slot_is_stable_for_same_key() {
     assert_eq!(
         super::RedisMetaStore::local_lock_slot_for_key("c42_0"),
@@ -1364,6 +1407,14 @@ async fn test_rename_lua_overwrite_file() {
         "overwritten inode should have nlink=0"
     );
     assert!(
+        store.get_paths(dst_ino).await.unwrap().is_empty(),
+        "fully overwritten inode should have no paths"
+    );
+    assert!(
+        store.load_link_parents(dst_ino).await.unwrap().is_empty(),
+        "fully overwritten inode should have no reverse links"
+    );
+    assert!(
         store.stat(dst_ino).await.unwrap().is_some(),
         "tombstoned inode should remain until GC"
     );
@@ -1373,6 +1424,62 @@ async fn test_rename_lua_overwrite_file() {
         deleted.contains(&dst_ino),
         "overwritten inode should be queued for cleanup"
     );
+}
+
+#[serial]
+#[tokio::test]
+#[ignore]
+async fn test_rename_lua_overwrite_hardlink_removes_reverse_entry() {
+    let store = new_test_store().await;
+    let root = store.root_ino();
+
+    let overwritten_ino = store
+        .create_file(root, "original.txt".to_string())
+        .await
+        .unwrap();
+    store
+        .link(overwritten_ino, root, "remaining.txt")
+        .await
+        .unwrap();
+    let source_ino = store
+        .create_file(root, "source.txt".to_string())
+        .await
+        .unwrap();
+
+    store
+        .rename(root, "source.txt", root, "original.txt".to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.lookup(root, "original.txt").await.unwrap(),
+        Some(source_ino)
+    );
+    assert_eq!(
+        store.lookup(root, "remaining.txt").await.unwrap(),
+        Some(overwritten_ino)
+    );
+    let remaining = store.get_node(overwritten_ino).await.unwrap().unwrap();
+    assert_eq!(remaining.attr.nlink, 1);
+    assert_eq!(remaining.parent, root);
+    assert_eq!(remaining.name, "remaining.txt");
+    assert_eq!(
+        store.get_paths(overwritten_ino).await.unwrap(),
+        vec!["/remaining.txt"]
+    );
+    assert!(
+        store
+            .load_link_parents(overwritten_ino)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    store.unlink(root, "remaining.txt").await.unwrap();
+    let deleted = store.get_node(overwritten_ino).await.unwrap().unwrap();
+    assert!(deleted.deleted);
+    assert_eq!(deleted.attr.nlink, 0);
+    assert!(store.get_paths(overwritten_ino).await.unwrap().is_empty());
 }
 
 #[serial]
@@ -4705,6 +4812,41 @@ async fn test_redis_xattr_crud_flags_and_binary_values() {
     ] {
         assert!(matches!(operation, Err(MetaError::NotFound(found)) if found == 999_999));
     }
+}
+
+#[serial]
+#[tokio::test]
+#[ignore]
+async fn test_redis_xattr_preserves_nanosecond_timestamps() {
+    let store = new_test_store().await;
+    let root = store.root_ino();
+    let inode = store
+        .create_file(root, "x\"attr\": {\"ctime\": 1}".to_string())
+        .await
+        .unwrap();
+
+    let atime = 1_700_000_000_123_456_789;
+    let mtime = 1_700_000_100_987_654_321;
+    let mut node = store.get_node(inode).await.unwrap().unwrap();
+    node.attr.atime = atime;
+    node.attr.mtime = mtime;
+    store.save_node(&node).await.unwrap();
+
+    store
+        .set_xattr(inode, "user.precision", b"value", 0)
+        .await
+        .unwrap();
+    let after_set = store.get_node(inode).await.unwrap().unwrap();
+    assert_eq!(after_set.attr.atime, atime);
+    assert_eq!(after_set.attr.mtime, mtime);
+    assert!(after_set.attr.ctime > node.attr.ctime);
+    let set_ctime = after_set.attr.ctime;
+
+    store.remove_xattr(inode, "user.precision").await.unwrap();
+    let after_remove = store.get_node(inode).await.unwrap().unwrap();
+    assert_eq!(after_remove.attr.atime, atime);
+    assert_eq!(after_remove.attr.mtime, mtime);
+    assert!(after_remove.attr.ctime >= set_ctime);
 }
 
 #[serial]

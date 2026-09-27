@@ -15,8 +15,9 @@ use asyncfuse::notify::Notify as FuseNotify;
 use bytes::Bytes;
 use dashmap::{DashMap, Entry};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
@@ -757,6 +758,8 @@ where
     pub(crate) backend: Arc<Backend<S, M>>,
     pub(crate) meta_layer: Arc<M>,
     root: i64,
+    fuse_mount_point: OnceLock<PathBuf>,
+    fuse_mount_id: OnceLock<u64>,
 }
 
 impl<S, M> VfsCore<S, M>
@@ -775,6 +778,8 @@ where
             backend,
             meta_layer,
             root,
+            fuse_mount_point: OnceLock::new(),
+            fuse_mount_id: OnceLock::new(),
         }
     }
 }
@@ -1459,6 +1464,50 @@ where
         self.file_handle(fh)
             .map(|handle| handle.ino == ino && handle.flags.write)
             .unwrap_or(false)
+    }
+
+    pub(crate) fn handle_allows_clone_for_inode(&self, fh: u64, ino: i64) -> bool {
+        self.file_handle(fh)
+            .is_some_and(|handle| handle.ino == ino && handle.flags.write && !handle.flags.append)
+    }
+
+    /// Bind this VFS instance to the canonical host path used for its FUSE
+    /// mount.  FICLONE source descriptors are accepted only from this mount;
+    /// keeping the identity in the shared core also covers cloned VFS handles.
+    pub(crate) fn set_fuse_mount_point(&self, mount_point: &Path) -> std::io::Result<()> {
+        let canonical = mount_point.canonicalize()?;
+        if let Some(existing) = self.core.fuse_mount_point.get() {
+            if existing != &canonical {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "VFS is already bound to a different FUSE mount point",
+                ));
+            }
+            return Ok(());
+        }
+        self.core.fuse_mount_point.set(canonical).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::AlreadyExists, "FUSE mount point raced")
+        })
+    }
+
+    pub(crate) fn fuse_mount_point(&self) -> Option<&Path> {
+        self.core.fuse_mount_point.get().map(PathBuf::as_path)
+    }
+
+    pub(crate) fn set_fuse_mount_id(&self, mount_id: u64) -> std::io::Result<()> {
+        if let Err(mount_id) = self.core.fuse_mount_id.set(mount_id) {
+            if self.core.fuse_mount_id.get() != Some(&mount_id) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "VFS is already bound to a different FUSE mount",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fuse_mount_id(&self) -> Option<u64> {
+        self.core.fuse_mount_id.get().copied()
     }
 
     fn file_handles_for_inode(&self, ino: i64) -> Vec<Arc<FileHandle<S, M>>> {

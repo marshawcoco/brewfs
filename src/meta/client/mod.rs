@@ -830,7 +830,7 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
         }
     }
 
-    async fn remember_trash_entry(&self, ino: i64, original_path: String) {
+    async fn remember_trash_entry(&self, ino: i64, original_path: String, flags: u32) {
         if !self.store.capabilities().xattr {
             return;
         }
@@ -848,7 +848,7 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
         };
         if let Err(err) = self
             .store
-            .set_xattr(ino, CONTROL_TRASH_XATTR_NAME, &raw, 0)
+            .set_xattr(ino, CONTROL_TRASH_XATTR_NAME, &raw, flags)
             .await
         {
             warn!(inode = ino, error = ?err, "failed to persist trash metadata");
@@ -1763,6 +1763,11 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
         // Only the backend transaction/script can decide whether the current
         // destination is the source inode or a different inode. Destination
         // hints may be stale across clients and must never control the rename.
+        // Capture the destination's user-visible path before the transaction;
+        // the backend outcome decides whether an inode was actually replaced.
+        let destination_original_path = self
+            .child_original_path_for_trash(new_parent, &new_name)
+            .await;
         let outcome = if noreplace {
             self.store
                 .rename_with_mode(old_parent, old_name, new_parent, new_name.clone(), true)
@@ -1800,6 +1805,32 @@ impl<T: MetaStore + ?Sized + 'static> MetaClient<T> {
         self.invalidate_open_file_cache_inode(src_ino).await;
         if let Some(dest_ino) = outcome.replaced_ino {
             self.invalidate_open_file_cache_inode(dest_ino).await;
+
+            // Rename-overwrite is an unlink from the destination namespace.
+            // Preserve trash metadata only when the backend reports that the
+            // replaced inode lost its final link. Hard-linked destinations stay
+            // live and must not become restorable trash entries.
+            if !outcome.replaced_is_dir
+                && self
+                    .store
+                    .stat(dest_ino)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|attr| attr.nlink == 0)
+            {
+                // Create-only is intentional: a concurrent final unlink may
+                // already have recorded the surviving hard link's path.  In
+                // that case preserve its metadata; the unlink path uses a
+                // replacing update below and therefore wins when it happens
+                // after this rename.
+                self.remember_trash_entry(
+                    dest_ino,
+                    destination_original_path,
+                    libc::XATTR_CREATE as u32,
+                )
+                .await;
+            }
         }
 
         debug!("MetaClient: rename completed, updating cache");
@@ -2662,7 +2693,7 @@ impl<T: MetaStore + ?Sized + 'static> MetaLayer for MetaClient<T> {
         let original_path = self.child_original_path_for_trash(parent, name).await;
         self.store.unlink(parent, name).await?;
         if let Some(ino) = target_ino {
-            self.remember_trash_entry(ino, original_path).await;
+            self.remember_trash_entry(ino, original_path, 0).await;
         }
 
         debug!("MetaClient: unlink completed, updating cache");
@@ -3543,6 +3574,85 @@ mod tests {
             .1;
         assert_eq!(linked_after.ino, dst);
         assert_eq!(linked_after.nlink, 1);
+    }
+
+    #[tokio::test]
+    async fn rename_over_file_preserves_trash_metadata_only_after_final_unlink() {
+        let client = create_test_client().await;
+        let docs = client.mkdir(1, "docs".to_string()).await.unwrap();
+        let source = client
+            .create_file(docs, "source".to_string())
+            .await
+            .unwrap();
+        let destination = client
+            .create_file(docs, "destination".to_string())
+            .await
+            .unwrap();
+
+        client
+            .rename(docs, "source", docs, "destination".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.lookup(docs, "destination").await.unwrap(),
+            Some(source)
+        );
+        let metadata = client
+            .store
+            .get_xattr(destination, CONTROL_TRASH_XATTR_NAME)
+            .await
+            .unwrap()
+            .expect("overwritten inode should carry trash metadata");
+        let metadata: ControlTrashMetadata = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(metadata.original_path, "/docs/destination");
+
+        let linked = client
+            .create_file(docs, "linked".to_string())
+            .await
+            .unwrap();
+        client.link(linked, docs, "linked-alias").await.unwrap();
+        let _replacement = client
+            .create_file(docs, "replacement".to_string())
+            .await
+            .unwrap();
+        client
+            .rename(docs, "replacement", docs, "linked".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.lookup(docs, "linked-alias").await.unwrap(),
+            Some(linked)
+        );
+        assert_eq!(
+            client
+                .store
+                .get_xattr(linked, CONTROL_TRASH_XATTR_NAME)
+                .await
+                .unwrap(),
+            None,
+            "a destination with another hard link must not be moved to trash"
+        );
+
+        let noreplace_source = client
+            .create_file(docs, "noreplace-source".to_string())
+            .await
+            .unwrap();
+        let error = client
+            .rename_noreplace(docs, "noreplace-source", docs, "destination".to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MetaError::AlreadyExists { .. }));
+        assert_eq!(
+            client
+                .store
+                .get_xattr(noreplace_source, CONTROL_TRASH_XATTR_NAME)
+                .await
+                .unwrap(),
+            None,
+            "a failed noreplace must not create trash metadata"
+        );
     }
 
     #[tokio::test]

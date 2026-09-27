@@ -56,6 +56,7 @@ const LOCKS_KEY: &str = "locks";
 const LOCKED_KEY: &str = "locked";
 const LINK_PARENT_KEY_PREFIX: &str = "lp:";
 const TRUNCATE_REWRITE_MAX_RETRIES: usize = 64;
+const XATTR_UPDATE_MAX_RETRIES: usize = 64;
 
 // Lua script for atomically replacing a chunk's slice list when the version
 // matches the caller's expectation.  Returns 1 on success, 0 on version mismatch.
@@ -1205,6 +1206,24 @@ const RENAME_LUA: &str = r#"
                 redis.call('HSET', deleted_set_key, dest_ino_str, 1)
                 redis.call('DEL', link_parent_prefix .. dest_ino_str)
             else
+                -- Remove the overwritten directory entry from the reverse
+                -- hard-link index.  When this is the last remaining link,
+                -- restore the node's canonical parent/name just like
+                -- UNLINK_LUA does for the nlink=2 -> nlink=1 transition.
+                local dest_link_parents_key = link_parent_prefix .. dest_ino_str
+                redis.call('SREM', dest_link_parents_key, new_parent_ino .. ':' .. new_name)
+                if dest_node.attr.nlink == 1 then
+                    local remaining_members = redis.call('SMEMBERS', dest_link_parents_key)
+                    if #remaining_members == 1 then
+                        local member = remaining_members[1]
+                        local separator = string.find(member, ':', 1, true)
+                        if separator then
+                            dest_node.parent = tonumber(string.sub(member, 1, separator - 1))
+                            dest_node.name = string.sub(member, separator + 1)
+                        end
+                        redis.call('DEL', dest_link_parents_key)
+                    end
+                end
                 dest_node.attr.ctime = timestamp
                 redis.call('SET', dest_node_key, cjson.encode(dest_node))
             end
@@ -1542,14 +1561,10 @@ const RENAME_EXCHANGE_LUA: &str = r#"
 // preserve arbitrary bytes, so the value is passed directly as a binary ARGV.
 // KEYS[1] = inode node key, KEYS[2] = xattr hash key
 // ARGV[1] = xattr name, ARGV[2] = value, ARGV[3] = create-only,
-// ARGV[4] = replace-only, ARGV[5] = new ctime
+// ARGV[4] = replace-only, ARGV[5] = expected node JSON, ARGV[6] = updated node JSON
 //
-// Known limitation: like the other node-mutating scripts here, this re-encodes
-// the whole node JSON via cjson. Lua numbers are doubles, so nanosecond
-// timestamps above 2^53 lose precision on the round trip — an xattr-only
-// update therefore passively truncates mtime/atime (and other ns timestamps)
-// to roughly microsecond granularity. A ms-granularity timestamp migration is
-// tracked separately and is out of scope for this script.
+// Rust updates ctime with integer precision. Compare the complete original
+// node before committing so concurrent inode changes cannot be overwritten.
 const SET_XATTR_LUA: &str = r#"
     local function key_type(key)
         local reply = redis.call('TYPE', key)
@@ -1568,9 +1583,8 @@ const SET_XATTR_LUA: &str = r#"
     end
 
     local node_json = redis.call('GET', KEYS[1])
-    local decoded, node = pcall(cjson.decode, node_json)
-    if not decoded or not node or not node.attr then
-        return cjson.encode({ok=false, error='corrupt_node'})
+    if node_json ~= ARGV[5] then
+        return cjson.encode({ok=false, error='node_changed'})
     end
 
     local xattr_type = key_type(KEYS[2])
@@ -1588,20 +1602,14 @@ const SET_XATTR_LUA: &str = r#"
         return cjson.encode({ok=false, error='xattr_not_found'})
     end
 
-    local timestamp = tonumber(ARGV[5])
-    if not timestamp then
-        return cjson.encode({ok=false, error='invalid_ctime'})
-    end
-    node.attr.ctime = timestamp
     redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-    redis.call('SET', KEYS[1], cjson.encode(node))
+    redis.call('SET', KEYS[1], ARGV[6])
     return cjson.encode({ok=true})
 "#;
 
 // Atomically remove one xattr and update the inode ctime.
 // KEYS[1] = inode node key, KEYS[2] = xattr hash key
-// ARGV[1] = xattr name, ARGV[2] = new ctime
-// Same cjson ns-timestamp truncation caveat as SET_XATTR_LUA above.
+// ARGV[1] = xattr name, ARGV[2] = expected node JSON, ARGV[3] = updated node JSON
 const REMOVE_XATTR_LUA: &str = r#"
     local function key_type(key)
         local reply = redis.call('TYPE', key)
@@ -1620,9 +1628,8 @@ const REMOVE_XATTR_LUA: &str = r#"
     end
 
     local node_json = redis.call('GET', KEYS[1])
-    local decoded, node = pcall(cjson.decode, node_json)
-    if not decoded or not node or not node.attr then
-        return cjson.encode({ok=false, error='corrupt_node'})
+    if node_json ~= ARGV[2] then
+        return cjson.encode({ok=false, error='node_changed'})
     end
 
     local xattr_type = key_type(KEYS[2])
@@ -1633,13 +1640,8 @@ const REMOVE_XATTR_LUA: &str = r#"
         return cjson.encode({ok=false, error='xattr_not_found'})
     end
 
-    local timestamp = tonumber(ARGV[2])
-    if not timestamp then
-        return cjson.encode({ok=false, error='invalid_ctime'})
-    end
-    node.attr.ctime = timestamp
     redis.call('HDEL', KEYS[2], ARGV[1])
-    redis.call('SET', KEYS[1], cjson.encode(node))
+    redis.call('SET', KEYS[1], ARGV[3])
     return cjson.encode({ok=true})
 "#;
 
@@ -2633,42 +2635,64 @@ impl MetaStore for RedisMetaStore {
     ) -> Result<(), MetaError> {
         let create_only = flags & (libc::XATTR_CREATE as u32) != 0;
         let replace_only = flags & (libc::XATTR_REPLACE as u32) != 0;
-        let result: String = redis::Script::new(SET_XATTR_LUA)
-            .key(self.node_key(inode))
-            .key(self.xattr_key(inode))
-            .arg(name)
-            .arg(value)
-            .arg(if create_only { 1 } else { 0 })
-            .arg(if replace_only { 1 } else { 0 })
-            .arg(current_time())
-            .invoke_async(&mut self.conn.clone())
-            .await
-            .map_err(redis_err)?;
-        let response: LuaResponse = serde_json::from_str(&result)
-            .map_err(|e| MetaError::Internal(format!("Lua response parse error: {e}")))?;
+        for _ in 0..XATTR_UPDATE_MAX_RETRIES {
+            let node_key = self.node_key(inode);
+            let node_json: Vec<u8> = self
+                .conn
+                .clone()
+                .get::<_, Option<Vec<u8>>>(&node_key)
+                .await
+                .map_err(redis_err)?
+                .ok_or(MetaError::NotFound(inode))?;
+            let updated_node_json = update_node_ctime(&node_json, current_time())?;
+            let result: String = redis::Script::new(SET_XATTR_LUA)
+                .key(&node_key)
+                .key(self.xattr_key(inode))
+                .arg(name)
+                .arg(value)
+                .arg(if create_only { 1 } else { 0 })
+                .arg(if replace_only { 1 } else { 0 })
+                .arg(&node_json)
+                .arg(updated_node_json)
+                .invoke_async(&mut self.conn.clone())
+                .await
+                .map_err(redis_err)?;
+            let response: LuaResponse = serde_json::from_str(&result)
+                .map_err(|e| MetaError::Internal(format!("Lua response parse error: {e}")))?;
 
-        match response.error.as_deref() {
-            Some("node_not_found") => Err(MetaError::NotFound(inode)),
-            Some("already_exists") => Err(MetaError::AlreadyExists {
-                parent: inode,
-                name: name.to_string(),
-            }),
-            // Convention: `xattr_not_found` deliberately reuses
-            // MetaError::NotFound(inode) instead of a dedicated variant so the
-            // Redis and database stores share one mapping. This is safe at the
-            // syscall boundary: the FUSE layer pre-checks inode existence
-            // (ENOENT) and maps VfsError::NotFound to ENODATA for xattr
-            // operations, giving XATTR_REPLACE the correct errno.
-            Some("xattr_not_found") => Err(MetaError::NotFound(inode)),
-            Some("corrupt_node") => Err(MetaError::Internal("corrupt node data".into())),
-            Some("corrupt_xattr") => Err(MetaError::Internal("corrupt xattr data".into())),
-            Some(other) => Err(MetaError::Internal(format!("Lua error: {other}"))),
-            None if response.ok => {
-                self.invalidate_nodes(&[inode]).await;
-                Ok(())
+            match response.error.as_deref() {
+                Some("node_changed") => continue,
+                Some("node_not_found") => return Err(MetaError::NotFound(inode)),
+                Some("already_exists") => {
+                    return Err(MetaError::AlreadyExists {
+                        parent: inode,
+                        name: name.to_string(),
+                    });
+                }
+                // Convention: `xattr_not_found` deliberately reuses
+                // MetaError::NotFound(inode) instead of a dedicated variant so the
+                // Redis and database stores share one mapping. This is safe at the
+                // syscall boundary: the FUSE layer pre-checks inode existence
+                // (ENOENT) and maps VfsError::NotFound to ENODATA for xattr
+                // operations, giving XATTR_REPLACE the correct errno.
+                Some("xattr_not_found") => return Err(MetaError::NotFound(inode)),
+                Some("corrupt_node") => {
+                    return Err(MetaError::Internal("corrupt node data".into()));
+                }
+                Some("corrupt_xattr") => {
+                    return Err(MetaError::Internal("corrupt xattr data".into()));
+                }
+                Some(other) => return Err(MetaError::Internal(format!("Lua error: {other}"))),
+                None if response.ok => {
+                    self.invalidate_nodes(&[inode]).await;
+                    return Ok(());
+                }
+                None => return Err(MetaError::Internal("unexpected Lua response".into())),
             }
-            None => Err(MetaError::Internal("unexpected Lua response".into())),
         }
+        Err(MetaError::Internal(format!(
+            "xattr update conflicted too many times for inode {inode}"
+        )))
     }
 
     async fn get_xattr(&self, inode: i64, name: &str) -> Result<Option<Vec<u8>>, MetaError> {
@@ -2713,29 +2737,50 @@ impl MetaStore for RedisMetaStore {
     }
 
     async fn remove_xattr(&self, inode: i64, name: &str) -> Result<(), MetaError> {
-        let result: String = redis::Script::new(REMOVE_XATTR_LUA)
-            .key(self.node_key(inode))
-            .key(self.xattr_key(inode))
-            .arg(name)
-            .arg(current_time())
-            .invoke_async(&mut self.conn.clone())
-            .await
-            .map_err(redis_err)?;
-        let response: LuaResponse = serde_json::from_str(&result)
-            .map_err(|e| MetaError::Internal(format!("Lua response parse error: {e}")))?;
+        for _ in 0..XATTR_UPDATE_MAX_RETRIES {
+            let node_key = self.node_key(inode);
+            let node_json: Vec<u8> = self
+                .conn
+                .clone()
+                .get::<_, Option<Vec<u8>>>(&node_key)
+                .await
+                .map_err(redis_err)?
+                .ok_or(MetaError::NotFound(inode))?;
+            let updated_node_json = update_node_ctime(&node_json, current_time())?;
+            let result: String = redis::Script::new(REMOVE_XATTR_LUA)
+                .key(&node_key)
+                .key(self.xattr_key(inode))
+                .arg(name)
+                .arg(&node_json)
+                .arg(updated_node_json)
+                .invoke_async(&mut self.conn.clone())
+                .await
+                .map_err(redis_err)?;
+            let response: LuaResponse = serde_json::from_str(&result)
+                .map_err(|e| MetaError::Internal(format!("Lua response parse error: {e}")))?;
 
-        match response.error.as_deref() {
-            Some("node_not_found") => Err(MetaError::NotFound(inode)),
-            Some("xattr_not_found") => Err(MetaError::NotFound(inode)),
-            Some("corrupt_node") => Err(MetaError::Internal("corrupt node data".into())),
-            Some("corrupt_xattr") => Err(MetaError::Internal("corrupt xattr data".into())),
-            Some(other) => Err(MetaError::Internal(format!("Lua error: {other}"))),
-            None if response.ok => {
-                self.invalidate_nodes(&[inode]).await;
-                Ok(())
+            match response.error.as_deref() {
+                Some("node_changed") => continue,
+                Some("node_not_found") | Some("xattr_not_found") => {
+                    return Err(MetaError::NotFound(inode));
+                }
+                Some("corrupt_node") => {
+                    return Err(MetaError::Internal("corrupt node data".into()));
+                }
+                Some("corrupt_xattr") => {
+                    return Err(MetaError::Internal("corrupt xattr data".into()));
+                }
+                Some(other) => return Err(MetaError::Internal(format!("Lua error: {other}"))),
+                None if response.ok => {
+                    self.invalidate_nodes(&[inode]).await;
+                    return Ok(());
+                }
+                None => return Err(MetaError::Internal("unexpected Lua response".into())),
             }
-            None => Err(MetaError::Internal("unexpected Lua response".into())),
         }
+        Err(MetaError::Internal(format!(
+            "xattr update conflicted too many times for inode {inode}"
+        )))
     }
 
     async fn from_config(config: Config) -> Result<Self, MetaError> {
@@ -5410,6 +5455,23 @@ impl From<NodeKind> for FileType {
 
 fn current_time() -> i64 {
     Utc::now().timestamp_nanos_opt().unwrap_or(0)
+}
+
+fn update_node_ctime(node_json: &[u8], ctime: i64) -> Result<Vec<u8>, MetaError> {
+    let mut node: serde_json::Value = serde_json::from_slice(node_json)
+        .map_err(|err| MetaError::Internal(format!("corrupt node data: {err}")))?;
+    let attr = node
+        .get_mut("attr")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| MetaError::Internal("corrupt node data: missing attr".into()))?;
+    if !attr.contains_key("ctime") {
+        return Err(MetaError::Internal(
+            "corrupt node data: missing ctime".into(),
+        ));
+    }
+    attr.insert("ctime".to_string(), serde_json::json!(ctime));
+    serde_json::to_vec(&node)
+        .map_err(|err| MetaError::Internal(format!("failed to encode node data: {err}")))
 }
 
 fn redis_err(err: redis::RedisError) -> MetaError {

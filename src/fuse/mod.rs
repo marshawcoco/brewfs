@@ -37,6 +37,8 @@ use std::ffi::{OsStr, OsString};
 #[cfg(target_os = "linux")]
 use std::mem::size_of;
 use std::num::NonZeroU32;
+#[cfg(target_os = "linux")]
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asyncfuse::raw::Filesystem;
@@ -205,6 +207,7 @@ mod mount_tests {
     use crate::meta::factory::create_meta_store_from_url;
     use std::fs;
     use std::io::Write;
+    use std::os::fd::AsRawFd;
     use std::time::Duration as StdDuration;
 
     // Basic Linux mount smoke test controlled by BREWFS_FUSE_TEST
@@ -258,6 +261,29 @@ mod mount_tests {
         let content = fs::read(&file_path).expect("read back");
         assert_eq!(content, b"abc");
 
+        let clone_src_path = mnt_path.join("clone-source");
+        let clone_dst_path = mnt_path.join("clone-destination");
+        fs::write(&clone_src_path, b"clone-data").expect("write clone source");
+        fs::write(&clone_dst_path, b"old-data").expect("write clone destination");
+        let clone_src = fs::File::open(&clone_src_path).expect("open clone source");
+        let clone_dst = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&clone_dst_path)
+            .expect("open clone destination");
+        let clone_result = unsafe {
+            libc::ioctl(
+                clone_dst.as_raw_fd(),
+                libc::FICLONE as libc::c_ulong,
+                clone_src.as_raw_fd(),
+            )
+        };
+        assert_eq!(clone_result, 0, "valid in-mount FICLONE failed");
+        assert_eq!(
+            fs::read(&clone_dst_path).expect("read clone destination"),
+            b"clone-data"
+        );
+
         // List the directory
         let list = fs::read_dir(&dir)
             .expect("readdir")
@@ -298,6 +324,8 @@ mod mount_tests {
         fs::remove_dir(&sub_dir).expect("rmdir sub");
         fs::remove_dir(&hard_dir).expect("rmdir hard");
         fs::remove_file(&file_path).expect("unlink");
+        fs::remove_file(&clone_src_path).expect("unlink clone source");
+        fs::remove_file(&clone_dst_path).expect("unlink clone destination");
 
         // Explicitly unmount and wait
         if let Err(e) = handle.unmount().await {
@@ -397,35 +425,65 @@ where
             return Err(libc::EBADF.into());
         }
 
-        let link = std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
-            .map_err(|_| Errno::from(libc::ENOENT))?;
-        let mut host_path = link.to_string_lossy().into_owned();
-        if let Some(stripped) = host_path.strip_suffix(" (deleted)") {
-            host_path = stripped.to_string();
+        let fd_path = format!("/proc/{pid}/fd/{fd}");
+        let fdinfo = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}"))
+            .map_err(|_| Errno::from(libc::EBADF))?;
+        let info = parse_proc_fdinfo(&fdinfo).ok_or_else(|| Errno::from(libc::EBADF))?;
+        if !proc_fd_can_read(info) {
+            return Err(libc::EBADF.into());
         }
-        if !host_path.starts_with('/') {
+
+        let expected_mount_id = self
+            .fuse_mount_id()
+            .ok_or_else(|| Errno::from(libc::EXDEV))?;
+        if info.mount_id != expected_mount_id {
             return Err(libc::EXDEV.into());
         }
 
-        let mut starts = vec![0];
-        for (idx, ch) in host_path.char_indices().skip(1) {
-            if ch == '/' {
-                starts.push(idx);
+        let link = std::fs::read_link(&fd_path).map_err(|_| Errno::from(libc::EBADF))?;
+        let host_path = link.to_string_lossy();
+        let deleted = host_path.strip_suffix(" (deleted)");
+        let path_without_deleted = deleted.unwrap_or(&host_path);
+        if !path_without_deleted.starts_with('/') {
+            return Err(libc::EXDEV.into());
+        }
+
+        // A deleted descriptor has no lookupable path, so its stable FUSE
+        // inode is used after the mount-device check. Live descriptors must
+        // also pass a component-boundary and metadata-inode check.
+        let mount_point = self
+            .fuse_mount_point()
+            .ok_or_else(|| Errno::from(libc::EXDEV))?;
+        let fd_ino = i64::try_from(info.ino).map_err(|_| Errno::from(libc::EOVERFLOW))?;
+        if deleted.is_none() {
+            let candidate = mount_relative_path(mount_point, Path::new(path_without_deleted))
+                .ok_or_else(|| Errno::from(libc::EXDEV))?;
+            let lookup_ino = self
+                .lookup_path_to_ino(&candidate.to_string_lossy())
+                .await
+                .map_err(|_| Errno::from(libc::EXDEV))?;
+            if lookup_ino != fd_ino {
+                return Err(libc::EXDEV.into());
             }
         }
 
-        for start in starts {
-            let candidate = &host_path[start..];
-            if let Ok(ino) = self.lookup_path_to_ino(candidate).await {
-                return Ok(ino);
-            }
-        }
-
-        Err(libc::EXDEV.into())
+        self.stat_ino(fd_ino)
+            .await
+            .map(|_| fd_ino)
+            .ok_or_else(|| Errno::from(libc::ENOENT))
     }
 
     #[cfg(target_os = "linux")]
-    async fn ioctl_ficlone(&self, req: Request, dst_ino: u64, arg: u64) -> FuseResult<ReplyIoctl> {
+    async fn ioctl_ficlone(
+        &self,
+        req: Request,
+        dst_ino: u64,
+        fh: u64,
+        arg: u64,
+    ) -> FuseResult<ReplyIoctl> {
+        if !self.handle_allows_clone_for_inode(fh, dst_ino as i64) {
+            return Err(libc::EBADF.into());
+        }
         let src_fd = i32::try_from(arg).map_err(|_| Errno::from(libc::EINVAL))?;
         let src_ino = self
             .resolve_proc_fd_inode(req.pid, i64::from(src_fd))
@@ -453,8 +511,12 @@ where
         &self,
         req: Request,
         dst_ino: u64,
+        fh: u64,
         in_data: &[u8],
     ) -> FuseResult<ReplyIoctl> {
+        if !self.handle_allows_clone_for_inode(fh, dst_ino as i64) {
+            return Err(libc::EBADF.into());
+        }
         let range = Self::parse_clone_range(in_data).ok_or_else(|| Errno::from(libc::EINVAL))?;
         let src_ino = self.resolve_proc_fd_inode(req.pid, range.src_fd).await?;
         self.copy_file_range_inodes(
@@ -610,6 +672,45 @@ struct FileCloneRange {
     src_offset: u64,
     src_length: u64,
     dest_offset: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcFdInfo {
+    flags: u64,
+    mount_id: u64,
+    ino: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_fdinfo(data: &str) -> Option<ProcFdInfo> {
+    let value = |name: &str, radix: u32| {
+        data.lines().find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|value| u64::from_str_radix(value.trim(), radix).ok())
+        })
+    };
+    Some(ProcFdInfo {
+        flags: value("flags:", 8)?,
+        mount_id: value("mnt_id:", 10)?,
+        ino: value("ino:", 10)?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn proc_fd_can_read(info: ProcFdInfo) -> bool {
+    let access_mode = info.flags & (libc::O_ACCMODE as u64);
+    info.flags & (libc::O_PATH as u64) == 0
+        && access_mode != libc::O_WRONLY as u64
+        && access_mode != libc::O_ACCMODE as u64
+}
+
+#[cfg(target_os = "linux")]
+fn mount_relative_path(mount_point: &Path, host_path: &Path) -> Option<PathBuf> {
+    let relative = host_path.strip_prefix(mount_point).ok()?;
+    let mut logical = PathBuf::from("/");
+    logical.push(relative);
+    Some(logical)
 }
 
 #[allow(refining_impl_trait_reachable)]
@@ -2135,7 +2236,7 @@ where
         &self,
         req: Request,
         inode: u64,
-        _fh: u64,
+        fh: u64,
         flags: u32,
         cmd: u32,
         arg: u64,
@@ -2162,9 +2263,9 @@ where
                 // FS_IOC_FSGETXATTR = _IOR('X', 31, struct fsxattr).
                 // xfs_io labels this probe FS_IOC_GETXATTR in diagnostics.
                 0x801c_581f => Ok(Self::ioctl_fsgetxattr_reply()),
-                x if x == libc::FICLONE as u32 => self.ioctl_ficlone(req, inode, arg).await,
+                x if x == libc::FICLONE as u32 => self.ioctl_ficlone(req, inode, fh, arg).await,
                 x if x == libc::FICLONERANGE as u32 => {
-                    self.ioctl_ficlonerange(req, inode, in_data).await
+                    self.ioctl_ficlonerange(req, inode, fh, in_data).await
                 }
                 _ => Err(libc::EOPNOTSUPP.into()),
             }
@@ -3214,12 +3315,16 @@ mod mode_sanitization_tests {
         readdirplus_child_records, sanitize_special_mode_bits, validate_fuse_name,
         vfs_kind_to_fuse, vfs_to_fuse_attr,
     };
+    #[cfg(target_os = "linux")]
+    use super::{ProcFdInfo, mount_relative_path, parse_proc_fdinfo, proc_fd_can_read};
     use crate::control::protocol::ControlAclEntry;
     use crate::vfs::error::{PathHint, VfsError};
     use crate::vfs::fs::{FileAttr as VfsFileAttr, FileType as VfsFileType};
     use asyncfuse::raw::Request;
     use asyncfuse::{Errno, FileType as FuseFileType};
     use std::collections::BTreeSet;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
 
     #[test]
     fn sanitize_special_mode_bits_preserves_setuid_setgid_and_sticky() {
@@ -3448,6 +3553,72 @@ mod mode_sanitization_tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_source_path_requires_mount_component_boundary() {
+        let mount = std::path::Path::new("/mnt/brewfs");
+        assert_eq!(
+            mount_relative_path(mount, std::path::Path::new("/mnt/brewfs/file")),
+            Some(std::path::PathBuf::from("/file"))
+        );
+        assert_eq!(
+            mount_relative_path(mount, std::path::Path::new("/mnt/brewfs2/file")),
+            None
+        );
+        assert_eq!(
+            mount_relative_path(mount, std::path::Path::new("/tmp/file")),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_source_fdinfo_rejects_write_only_and_path_handles() {
+        let read_write = parse_proc_fdinfo("flags:\t0100002\nmnt_id:\t42\nino:\t99\n").unwrap();
+        assert_eq!(
+            read_write,
+            ProcFdInfo {
+                flags: 0o100002,
+                mount_id: 42,
+                ino: 99,
+            }
+        );
+        assert!(proc_fd_can_read(read_write));
+
+        let write_only = parse_proc_fdinfo("flags:\t0100001\nmnt_id:\t42\nino:\t99\n").unwrap();
+        assert!(!proc_fd_can_read(write_only));
+
+        let path_only = parse_proc_fdinfo("flags:\t010000000\nmnt_id:\t42\nino:\t99\n").unwrap();
+        assert!(!proc_fd_can_read(path_only));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_source_external_live_and_deleted_paths_fail_closed() {
+        let mount = std::path::Path::new("/mnt/brewfs");
+        for path in ["/tmp/brewfs-source", "/tmp/brewfs-source (deleted)"] {
+            assert_eq!(mount_relative_path(mount, std::path::Path::new(path)), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_source_external_live_and_deleted_fds_fail_closed_without_fuse() {
+        let mount = std::path::Path::new("/mnt/brewfs");
+        let external = tempfile::NamedTempFile::new().unwrap();
+        let fd = external.as_file().as_raw_fd();
+        let live_link = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+        assert!(mount_relative_path(mount, &live_link).is_none());
+
+        let external_path = external.path().to_path_buf();
+        std::fs::remove_file(&external_path).unwrap();
+        let deleted_link = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+        assert!(deleted_link.to_string_lossy().ends_with(" (deleted)"));
+        let deleted_path = deleted_link.to_string_lossy();
+        let deleted_path = deleted_path.strip_suffix(" (deleted)").unwrap();
+        assert!(mount_relative_path(mount, std::path::Path::new(deleted_path)).is_none());
+    }
+
     #[test]
     fn special_file_types_map_to_fuse_types_and_rdev() {
         assert_eq!(vfs_kind_to_fuse(VfsFileType::Fifo), FuseFileType::NamedPipe);
@@ -3552,6 +3723,38 @@ mod fuse_init_tests {
         let reply = Filesystem::init(&fs, Request::default()).await.unwrap();
 
         assert_eq!(reply.max_write.get(), 4 * 1024 * 1024);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn clone_rejects_readonly_destination_before_resolving_source() {
+        let fs = new_fuse_test_vfs().await;
+        let inode = fs.create_file("/destination").await.unwrap();
+        fs.write_ino(inode, 0, b"keep").await.unwrap();
+        let opened = Filesystem::open(&fs, user_request(), inode as u64, libc::O_RDONLY as u32)
+            .await
+            .unwrap();
+
+        let error = Filesystem::ioctl(
+            &fs,
+            user_request(),
+            inode as u64,
+            opened.fh,
+            0,
+            libc::FICLONE as u32,
+            u64::MAX,
+            &[],
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, Errno::from(libc::EBADF));
+        assert_eq!(fs.stat("/destination").await.unwrap().size, 4);
+        assert_eq!(fs.read(opened.fh, 0, 4).await.unwrap(), b"keep");
+
+        Filesystem::release(&fs, user_request(), inode as u64, opened.fh, 0, 0, false)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
