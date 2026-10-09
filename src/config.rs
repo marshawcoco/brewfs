@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use url::Url;
 
+use crate::cadapter::s3::validate_rustfs_ec_block_size_hint;
 use crate::chunk::bandwidth::BandwidthConfig;
 use crate::chunk::cache_integrity::CacheIntegrityMode;
 use crate::chunk::compress::Compression;
@@ -19,6 +20,12 @@ pub const DEFAULT_FUSE_MAX_BACKGROUND: usize = 512;
 
 fn default_fuse_workers() -> usize {
     1
+}
+
+fn parse_rustfs_ec_block_size_hint(value: &str) -> Result<usize, String> {
+    let size = value.parse::<usize>().map_err(|error| error.to_string())?;
+    validate_rustfs_ec_block_size_hint(Some(size)).map_err(|error| error.to_string())?;
+    Ok(size)
 }
 
 fn long_version() -> &'static str {
@@ -235,6 +242,11 @@ pub struct MountArgs {
     /// Reduces CPU usage by ~20% on write paths. Safe for self-hosted S3 backends.
     #[arg(long)]
     pub s3_disable_payload_checksum: Option<bool>,
+
+    /// Fixed RustFS EC block size hint in bytes (65536, 262144, 1048576 or 4194304).
+    /// Omit to disable. Requires the s3 backend and a compatible RustFS server.
+    #[arg(long, value_name = "BYTES", value_parser = parse_rustfs_ec_block_size_hint)]
+    pub s3_rustfs_ec_block_size_hint: Option<usize>,
 
     /// Metadata backend (sqlx, etcd, redis or tikv).
     #[arg(long, value_enum)]
@@ -457,6 +469,11 @@ pub struct ObjectPutBenchArgs {
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub s3_disable_payload_checksum: bool,
 
+    /// Fixed RustFS EC block size hint in bytes (65536, 262144, 1048576 or 4194304).
+    /// Omit to disable. Requires a compatible RustFS server.
+    #[arg(long, value_name = "BYTES", value_parser = parse_rustfs_ec_block_size_hint)]
+    pub s3_rustfs_ec_block_size_hint: Option<usize>,
+
     /// Object payload size in bytes.
     #[arg(long, default_value_t = DEFAULT_BLOCK_SIZE as usize)]
     pub object_size: usize,
@@ -542,6 +559,7 @@ pub struct S3FileConfig {
     pub max_concurrency: Option<usize>,
     pub force_path_style: Option<bool>,
     pub disable_payload_checksum: Option<bool>,
+    pub rustfs_ec_block_size_hint: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -638,6 +656,7 @@ pub struct MountConfig {
     pub s3_max_concurrency: usize,
     pub s3_force_path_style: bool,
     pub s3_disable_payload_checksum: bool,
+    pub s3_rustfs_ec_block_size_hint: Option<usize>,
     pub meta_backend: MetaBackendKind,
     pub meta_url: String,
     pub meta_etcd_urls: Vec<String>,
@@ -698,6 +717,13 @@ impl MountConfig {
             .data_backend
             .or(data_cfg.backend)
             .unwrap_or(DataBackendKind::LocalFs);
+        let s3_rustfs_ec_block_size_hint = args
+            .s3_rustfs_ec_block_size_hint
+            .or(s3_cfg.rustfs_ec_block_size_hint);
+        validate_rustfs_ec_block_size_hint(s3_rustfs_ec_block_size_hint)?;
+        if s3_rustfs_ec_block_size_hint.is_some() && !matches!(data_backend, DataBackendKind::S3) {
+            anyhow::bail!("RustFS EC block size hint requires data.backend=s3");
+        }
 
         if matches!(cache.writeback_mode, WriteBackMode::CommitBeforeUpload)
             && !matches!(data_backend, DataBackendKind::S3)
@@ -758,6 +784,7 @@ impl MountConfig {
                 .s3_disable_payload_checksum
                 .or(s3_cfg.disable_payload_checksum)
                 .unwrap_or(true),
+            s3_rustfs_ec_block_size_hint,
             meta_backend,
             meta_url: args
                 .meta_url
@@ -1100,6 +1127,7 @@ mod tests {
             s3_max_concurrency: None,
             s3_force_path_style: None,
             s3_disable_payload_checksum: None,
+            s3_rustfs_ec_block_size_hint: None,
             meta_backend: None,
             meta_url: None,
             meta_etcd_urls: None,
@@ -1199,6 +1227,190 @@ mod tests {
     }
 
     #[test]
+    fn mount_subcommand_accepts_rustfs_ec_block_size_hint() {
+        let cli = Cli::try_parse_from([
+            "brewfs",
+            "mount",
+            "/mnt/slayer",
+            "--data-backend",
+            "s3",
+            "--s3-bucket",
+            "test-bucket",
+            "--s3-rustfs-ec-block-size-hint",
+            "4194304",
+        ])
+        .expect("mount should accept the optional RustFS EC block size hint");
+
+        let Command::Mount(args) = cli.cmd else {
+            panic!("expected mount command");
+        };
+        assert_eq!(args.s3_rustfs_ec_block_size_hint, Some(4_194_304));
+    }
+
+    #[test]
+    fn rustfs_ec_block_size_hint_is_disabled_by_default() {
+        let config =
+            MountConfig::from_sources(empty_mount_args(None, Some(PathBuf::from("/mnt/slayer"))))
+                .unwrap();
+        assert_eq!(config.s3_rustfs_ec_block_size_hint, None);
+
+        let cli = Cli::try_parse_from(["brewfs", "object-put-bench", "--s3-bucket", "test-bucket"])
+            .unwrap();
+        let Command::ObjectPutBench(args) = cli.cmd else {
+            panic!("expected object-put-bench command");
+        };
+        assert_eq!(args.s3_rustfs_ec_block_size_hint, None);
+    }
+
+    #[test]
+    fn mount_rustfs_ec_block_size_hint_accepts_supported_sizes() {
+        for size in [65_536, 262_144, 1_048_576, 4_194_304] {
+            let value = size.to_string();
+            let cli = Cli::try_parse_from([
+                "brewfs",
+                "mount",
+                "/mnt/slayer",
+                "--data-backend",
+                "s3",
+                "--s3-rustfs-ec-block-size-hint",
+                &value,
+            ])
+            .unwrap();
+            let Command::Mount(args) = cli.cmd else {
+                panic!("expected mount command");
+            };
+            let config = MountConfig::from_sources(*args).unwrap();
+            assert_eq!(config.s3_rustfs_ec_block_size_hint, Some(size));
+            assert_eq!(config.block_size, DEFAULT_BLOCK_SIZE);
+        }
+    }
+
+    #[test]
+    fn object_put_bench_rustfs_ec_block_size_hint_accepts_supported_sizes() {
+        for size in [65_536, 262_144, 1_048_576, 4_194_304] {
+            let value = size.to_string();
+            let cli = Cli::try_parse_from([
+                "brewfs",
+                "object-put-bench",
+                "--s3-bucket",
+                "test-bucket",
+                "--s3-rustfs-ec-block-size-hint",
+                &value,
+            ])
+            .unwrap();
+            let Command::ObjectPutBench(args) = cli.cmd else {
+                panic!("expected object-put-bench command");
+            };
+            assert_eq!(args.s3_rustfs_ec_block_size_hint, Some(size));
+        }
+    }
+
+    #[test]
+    fn rustfs_ec_block_size_hint_cli_rejects_unsupported_values() {
+        for value in ["0", "65535", "131072", "2097152", "4194305", "-1", "bad"] {
+            assert!(
+                Cli::try_parse_from([
+                    "brewfs",
+                    "mount",
+                    "/mnt/slayer",
+                    "--s3-rustfs-ec-block-size-hint",
+                    value,
+                ])
+                .is_err(),
+                "mount accepted unsupported hint {value}"
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "brewfs",
+                    "object-put-bench",
+                    "--s3-bucket",
+                    "test-bucket",
+                    "--s3-rustfs-ec-block-size-hint",
+                    value,
+                ])
+                .is_err(),
+                "object-put-bench accepted unsupported hint {value}"
+            );
+        }
+    }
+
+    fn rustfs_hint_config_file(backend: &str, size: usize) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            format!(
+                "mount_point: /mnt/slayer\ndata:\n  backend: {backend}\n  s3:\n    rustfs_ec_block_size_hint: {size}\n"
+            ),
+        )
+        .unwrap();
+        file
+    }
+
+    #[test]
+    fn mount_rustfs_ec_block_size_hint_accepts_yaml_sizes() {
+        for size in [65_536, 262_144, 1_048_576, 4_194_304] {
+            let file = rustfs_hint_config_file("s3", size);
+            let config =
+                MountConfig::from_sources(empty_mount_args(Some(file.path().to_path_buf()), None))
+                    .unwrap();
+            assert_eq!(config.s3_rustfs_ec_block_size_hint, Some(size));
+            assert_eq!(config.block_size, DEFAULT_BLOCK_SIZE);
+        }
+    }
+
+    #[test]
+    fn mount_rustfs_ec_block_size_hint_cli_overrides_yaml() {
+        let file = rustfs_hint_config_file("s3", 4_194_304);
+        let mut args = empty_mount_args(Some(file.path().to_path_buf()), None);
+        args.s3_rustfs_ec_block_size_hint = Some(262_144);
+        let config = MountConfig::from_sources(args).unwrap();
+        assert_eq!(config.s3_rustfs_ec_block_size_hint, Some(262_144));
+    }
+
+    #[test]
+    fn mount_rustfs_ec_block_size_hint_rejects_unsupported_yaml_and_programmatic_values() {
+        for size in [0, 131_072, 2_097_152] {
+            let file = rustfs_hint_config_file("s3", size);
+            let error =
+                MountConfig::from_sources(empty_mount_args(Some(file.path().to_path_buf()), None))
+                    .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("RustFS EC block size hint must be")
+            );
+
+            let mut args = empty_mount_args(None, Some(PathBuf::from("/mnt/slayer")));
+            args.data_backend = Some(DataBackendKind::S3);
+            args.s3_rustfs_ec_block_size_hint = Some(size);
+            assert!(MountConfig::from_sources(args).is_err());
+        }
+    }
+
+    #[test]
+    fn mount_rustfs_ec_block_size_hint_requires_s3_backend() {
+        let cli = Cli::try_parse_from([
+            "brewfs",
+            "mount",
+            "/mnt/slayer",
+            "--s3-rustfs-ec-block-size-hint",
+            "65536",
+        ])
+        .unwrap();
+        let Command::Mount(args) = cli.cmd else {
+            panic!("expected mount command");
+        };
+        let error = MountConfig::from_sources(*args).unwrap_err();
+        assert!(error.to_string().contains("requires data.backend=s3"));
+
+        let file = rustfs_hint_config_file("local-fs", 65_536);
+        let error =
+            MountConfig::from_sources(empty_mount_args(Some(file.path().to_path_buf()), None))
+                .unwrap_err();
+        assert!(error.to_string().contains("requires data.backend=s3"));
+    }
+
+    #[test]
     fn mount_subcommand_parses_fuse_worker_args() {
         let cli = Cli::parse_from([
             "brewfs",
@@ -1262,6 +1474,7 @@ mod tests {
             s3_max_concurrency: None,
             s3_force_path_style: None,
             s3_disable_payload_checksum: None,
+            s3_rustfs_ec_block_size_hint: None,
             meta_backend: None,
             meta_url: None,
             meta_etcd_urls: None,
@@ -1329,6 +1542,7 @@ mod tests {
             s3_max_concurrency: None,
             s3_force_path_style: None,
             s3_disable_payload_checksum: None,
+            s3_rustfs_ec_block_size_hint: None,
             meta_backend: None,
             meta_url: None,
             meta_etcd_urls: None,
